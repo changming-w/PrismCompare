@@ -27,9 +27,23 @@
 图像显示与指标基于所选码值解释和颜色通道，软件不执行 HDR 色彩管理或显示器校准。文档比较针对可提取内容，不比较页面排版；扫描 PDF 需要先进行 OCR。
 
 
+## 下载 Windows 安装包
+
+**推荐最新版：[直接下载 Prism Compare 0.1.13（MSI，Windows x64）](https://github.com/changming-w/PrismCompare/releases/download/v0.1.13/PrismCompare-0.1.13-x64.msi)**
+
+适用于 Windows 10/11 x64，安装后即可使用，无需安装 Python。下载完成后双击 MSI，按安装向导操作。
+
+| 版本 | 安装包下载 | 主要更新 |
+| --- | --- | --- |
+| **0.1.13（推荐）** | [下载 MSI](https://github.com/changming-w/PrismCompare/releases/download/v0.1.13/PrismCompare-0.1.13-x64.msi) | 功能精简、布局优化、延后指标计算和缓存复用 |
+| 0.1.12 | [下载 MSI](https://github.com/changming-w/PrismCompare/releases/download/v0.1.12/PrismCompare-0.1.12-x64.msi) | 多图交换优化、专注模式改进、底部区域按需显示 |
+| 0.1.11 | [下载 MSI](https://github.com/changming-w/PrismCompare/releases/download/v0.1.11/PrismCompare-0.1.11-x64.msi) | 容差拖动稳定性、通道联动差异图、固定指标表格 |
+
+[查看全部版本与更新说明](https://github.com/changming-w/PrismCompare/releases)。每个版本附有 `SHA256SUMS.txt`，可用于校验 MSI 文件。
+
 ## 直接使用
 
-本仓库提供源码与构建脚本；下述 `releases/` 和 `dist/` 路径为本地构建产物，不包含在 Git 仓库中。
+本仓库提供源码与构建脚本，安装包通过上方 GitHub Releases 链接下载。下述 `releases/` 和 `dist/` 路径为本地构建产物，不包含在 Git 仓库中。
 
 推荐双击 `releases/PrismCompare-0.1.13-x64.msi` 安装，可选择安装目录，并创建桌面、开始菜单和资源管理器右键入口。通过 Windows 设置中的“已安装的应用”卸载。
 
