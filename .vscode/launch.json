@@ -1,0 +1,7 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {"name":"Prism Compare · 开发启动","type":"debugpy","request":"launch","program":"${workspaceFolder}/src/app.py","cwd":"${workspaceFolder}","console":"integratedTerminal","justMyCode":true},
+    {"name":"Prism Compare · 示例模式","type":"debugpy","request":"launch","program":"${workspaceFolder}/src/app.py","cwd":"${workspaceFolder}","args":["--demo"],"console":"integratedTerminal","justMyCode":true}
+  ]
+}
