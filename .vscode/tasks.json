@@ -1,0 +1,10 @@
+{
+  "version":"2.0.0",
+  "tasks":[
+    {"label":"安装开发环境","type":"shell","command":"powershell","args":["-NoProfile","-ExecutionPolicy","Bypass","-File","${workspaceFolder}/scripts/setup.ps1"],"problemMatcher":[]},
+    {"label":"运行核心测试","type":"process","command":"${workspaceFolder}/.venv/Scripts/python.exe","args":["-m","unittest","discover","-s","tests","-v"],"options":{"cwd":"${workspaceFolder}"},"group":"test","problemMatcher":[]},
+    {"label":"运行界面测试","type":"process","command":"${workspaceFolder}/.venv/Scripts/python.exe","args":["tests/ui_smoke.py"],"options":{"cwd":"${workspaceFolder}"},"problemMatcher":[]},
+    {"label":"打包 Windows 程序","type":"shell","command":"powershell","args":["-NoProfile","-ExecutionPolicy","Bypass","-File","${workspaceFolder}/scripts/build.ps1"],"group":"build","problemMatcher":[]},
+    {"label":"打包 MSI 安装包","type":"shell","command":"powershell","args":["-NoProfile","-ExecutionPolicy","Bypass","-File","${workspaceFolder}/scripts/build_msi.ps1"],"problemMatcher":[]}
+  ]
+}
