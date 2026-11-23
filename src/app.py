@@ -10,7 +10,7 @@ from core import rethreshold_bundle,ImageCache,Entry,Cancelled,checkpoint,scan_f
 from widgets import SettingsToggle,ComparePane,PaneArea,FileModel,ThumbDelegate,STYLE,LIGHT_STYLE,qimage,COLORS
 from details import DetailPanel
 
-APP_VERSION='0.1.12'
+APP_VERSION='0.1.13'
 
 def setup_fonts(app):
     # Also makes offscreen render tests use the same fonts as the native Windows UI.
@@ -85,7 +85,7 @@ class Window(QMainWindow):
             line.addWidget(self.button('选择…',lambda _=False,j=i:self.choose_source(j)));grid.addWidget(card,i//2,i%2);self.source_cards.append(card)
         outer.addWidget(self.sources)
         self.controls=QWidget();controls=QVBoxLayout(self.controls);controls.setContentsMargins(0,0,0,0);controls.setSpacing(6)
-        line=QHBoxLayout();line.setSpacing(4);line.addWidget(QLabel('基准'));self.baseline=self.combo(['A','B']);self.baseline.setMaximumWidth(230);self.baseline.setToolTip('选择基准图片或基准文件夹；文件夹中的每组图片都会使用此来源作为基准。');self.baseline.currentIndexChanged.connect(self.schedule_refresh);line.addWidget(self.baseline)
+        line=QHBoxLayout();line.setSpacing(4);line.addWidget(QLabel('基准'));self.baseline=self.combo(['A','B']);self.baseline.setFixedWidth(140);self.baseline.setToolTip('选择基准图片或基准文件夹；文件夹中的每组图片都会使用此来源作为基准。');self.baseline.currentIndexChanged.connect(self.schedule_refresh);line.addWidget(self.baseline)
         for edit in self.path_edits:edit.textChanged.connect(self.refresh_baseline_labels)
         self.view_mode=self.combo(['原图','红蓝差异','绝对差值','半透明叠加','滑动分割']);self.view_mode.currentIndexChanged.connect(self.select_result_mode);line.addWidget(self.view_mode)
         self.swap_button=self.button('左右交换',self.swap_sources);self.swap_button.setToolTip('仅交换当前打开的图片：两路交换 A/B，多路交换基准和所选图片。不修改文件夹路径，不重新扫描。');line.addWidget(self.swap_button)
@@ -95,7 +95,7 @@ class Window(QMainWindow):
         self.alpha=QCheckBox('Alpha');self.alpha.setToolTip('将 Alpha 通道纳入比较');self.alpha.setChecked(True);self.alpha.toggled.connect(self.schedule_refresh);line.addWidget(self.alpha)
         self.layout_mode=self.combo(['自动布局','横向并排','四宫格']);self.layout_mode.currentIndexChanged.connect(self.layout_panes)
         self.sync=QCheckBox('联动');self.sync.setToolTip('同步缩放与平移');self.sync.setChecked(True);line.addWidget(self.button('适应 F',self.fit_all));line.addWidget(self.button('100%  1',self.actual_all))
-        line.addSpacing(8);line.addWidget(QLabel('直方图'));self.hist_mode=self.combo(['RGB','Y','YUV','HSV','关闭']);self.hist_mode.setToolTip('直方图、指标和差异图使用同一通道模式；YUV 表示全范围 Y′CbCr，HSV 色相使用环形距离。');self.hist_mode.currentTextChanged.connect(self.hist_changed);line.addWidget(self.hist_mode)
+        line.addSpacing(8);self.hist_label=QLabel('通道');self.hist_label.setToolTip('直方图、指标和差异图共用的通道模式');line.addWidget(self.hist_label);self.hist_mode=self.combo(['RGB','Y','YUV','HSV','关闭']);self.hist_mode.setToolTip('直方图、指标和差异图使用同一通道模式；YUV 表示全范围 Y′CbCr，HSV 色相使用环形距离。');self.hist_mode.currentTextChanged.connect(self.hist_changed);line.addWidget(self.hist_mode)
         self.standard_label=QLabel('Y′权重');line.addWidget(self.standard_label)
         self.standard=self.combo(['BT.709','BT.2020','BT.601']);self.standard.setToolTip('用于 Y′ 直方图和 SSIM(Y′) 的 RGB 加权系数，不进行色域转换。');self.standard.currentIndexChanged.connect(self.schedule_refresh);line.addWidget(self.standard)
         self.log_hist=QCheckBox('对数');self.log_hist.setToolTip('直方图使用对数纵轴');self.log_hist.toggled.connect(self.hist_changed);line.addWidget(self.log_hist)
@@ -106,6 +106,7 @@ class Window(QMainWindow):
         line.addStretch();line.addWidget(self.layout_mode);line.addWidget(self.sync)
         self.ignore_space=QCheckBox('文本忽略行首尾空白');self.ignore_space.toggled.connect(self.schedule_refresh);line.addWidget(self.ignore_space)
         line.addWidget(self.button('上一处差异',lambda:self.jump_diff(-1)));line.addWidget(self.button('下一处差异 F7',lambda:self.jump_diff(1)));controls.addLayout(line);outer.addWidget(self.controls)
+        for widget,width in [(self.units,90),(self.storage,112),(self.hist_mode,64),(self.standard,84),(self.layout_mode,100)]:widget.setFixedWidth(width)
         self.progress=QProgressBar();self.progress.setRange(0,0);self.progress.setTextVisible(False);self.progress.hide();outer.addWidget(self.progress)
         self.split=QSplitter(Qt.Orientation.Horizontal);outer.addWidget(self.split,1)
         self.sidebar=QWidget();left=QVBoxLayout(self.sidebar);left.setContentsMargins(0,0,5,0);left.setSpacing(6)
@@ -124,7 +125,7 @@ class Window(QMainWindow):
             p.image.changed.connect(lambda state,j=i:self.sync_views(j,state));p.image.pixel.connect(self.pixel_values)
             p.image.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu);p.image.customContextMenuRequested.connect(lambda pos,j=i:self.image_context_menu(j,pos))
             p.text.verticalScrollBar().valueChanged.connect(lambda v,j=i:self.sync_text(j,v))
-        self.image_split=QSplitter(Qt.Orientation.Vertical);self.image_split.addWidget(self.workspace);self.details=DetailPanel();self.image_split.addWidget(self.details);self.details.hide();self.image_split.setSizes([440,330]);self.image_split.setChildrenCollapsible(False)
+        self.image_split=QSplitter(Qt.Orientation.Vertical);self.image_split.addWidget(self.workspace);self.details=DetailPanel();self.image_split.addWidget(self.details);self.details.hide();self.image_split.setSizes([440,330]);self.image_split.setChildrenCollapsible(False);self.saved_detail_sizes=None;self.image_split.splitterMoved.connect(self.remember_detail_sizes)
         self.details.threshold_changed.connect(self.threshold.setValue);self.threshold.valueChanged.connect(self.detail_threshold);self.units.currentIndexChanged.connect(self.detail_threshold)
         self.details.zoom_changed.connect(self.detail_zoom);self.details.fit_requested.connect(self.fit_all);self.details.actual_requested.connect(self.actual_all);self.details.pixel.connect(self.pixel_values)
         self.details.swap_requested.connect(self.swap_sources)
@@ -204,6 +205,13 @@ class Window(QMainWindow):
     def build_toolbar(self):
         from toolbar import build_toolbar
         build_toolbar(self)
+    def refresh_command_state(self):
+        if not hasattr(self,'toolbar_actions'):return
+        image_mode=bool(self.bundle and self.bundle['kind']=='image' and any(self.bundle['images']))
+        for name in ['左右交换当前图片','自动缩放：对齐基准显示大小','适应窗口','原始像素 1:1','全屏查看当前图片组','纯图片专注模式']:
+            self.toolbar_actions[name].setEnabled(image_mode)
+        for action in self.mode_actions.values():action.setEnabled(image_mode)
+        for name in ['上一项','下一项','上一处差异','下一处差异']:self.toolbar_actions[name].setEnabled(bool(self.rows))
     def build_menus(self):
         menus=[('文件(&F)',[('打开文件…\tCtrl+O',self.open_files),('添加文件夹…',self.add_folder),('重新比对\tCtrl+R',self.compare),('保存会话…',self.save_session),('打开会话…',self.open_session),('导出比较列表…',self.export_list),('退出',self.close)]),('视图(&V)',[('上一项\tAlt+←',lambda:self.navigate(-1)),('下一项\tAlt+→',lambda:self.navigate(1)),('适应窗口\tF',self.fit_all),('原始像素\t1',self.actual_all),('显示/隐藏文件列表\tCtrl+B',lambda:self.sidebar_controller.toggle()),('全屏查看图片\tF10',self.fullscreen_images),('专注图片\tF11',self.focus_mode)]),('比较(&C)',[('上一处差异\tShift+F7',lambda:self.jump_diff(-1)),('下一处差异\tF7',lambda:self.jump_diff(1)),('停止后台任务\tEsc',self.cancel_work)]),('帮助(&H)',[('使用说明与快捷键',self.help),('打开示例',self.demo)])]
         menu_map={}
@@ -350,7 +358,7 @@ class Window(QMainWindow):
         self.cancel_id(self.preview_id);self.preview_id=None;self.bundle=None;self.current_entry=None;self.rows=[];self.model.reset([],self.active_count())
         for p in self.panes:p.message(message)
         self.details.hide();self.details.bundle=None
-        self.counter.setText(message)
+        self.counter.setText(message);self.refresh_command_state()
     def refresh_sources(self):
         name=self.current_entry.name if self.current_entry else None
         self.compare(restore_name=name)
@@ -445,9 +453,9 @@ class Window(QMainWindow):
         if all(Path(p).suffix.lower() in IMAGE_EXTS for p in present):
             old=self.bundle['images'] if self.bundle and self.bundle['kind']=='image' else None
             args=(paths,base,self.threshold.value(),[255,1023,65535][self.units.currentIndex()],self.standard.currentText(),'left10' if self.storage.currentIndex()==1 else 'auto',self.alpha.isChecked())
-            previous=self.bundle if old else None
+            previous=self.bundle if old else None;compute_comparisons=memory_only or self.show_details.isChecked()
             metric_mode=self.hist_mode.currentText() if self.hist_mode.currentText()!='关闭' else self.last_metric_mode
-            self.preview_id=self.submit(lambda cancel,ready:image_bundle(*args,cancel=cancel,existing=old,metric_mode=metric_mode,ready=None if memory_only else ready,previous_bundle=previous,cache=None if memory_only else self.image_cache,cached_only=memory_only),'recompute' if memory_only else 'preview',staged=not memory_only)
+            self.preview_id=self.submit(lambda cancel,ready:image_bundle(*args,cancel=cancel,existing=old,metric_mode=metric_mode,ready=None if memory_only else ready,previous_bundle=previous,cache=None if memory_only else self.image_cache,cached_only=memory_only,compute_comparisons=compute_comparisons),'recompute' if memory_only else 'preview',staged=not memory_only)
         else:
             ignore=self.ignore_space.isChecked();self.preview_id=self.submit(lambda cancel,_:text_bundle(paths,base,ignore,cancel),'preview')
         self.statusBar().showMessage('正在更新指标 · 使用已缓存的图片' if memory_only else '正在比较 · 可继续操作，或按 Esc 停止')
@@ -470,20 +478,25 @@ class Window(QMainWindow):
                 else:p.message(b['errors'][i])
             if all(b['texts']) and not any(t['truncated'] for t in b['texts']):self.update_status('内容不同' if b['diff_rows'] else '内容相同')
             self.statusBar().showMessage(f'文本内容 · {len(b["diff_rows"]):,} 行存在差异 · F7 / Shift+F7 定位 · 文档仅比较提取内容')
-        self.update_view_controls();self.details_visibility();self.update_counter()
+        self.update_view_controls();self.details_visibility();self.update_counter();self.refresh_command_state()
     def update_status(self,value):
         if not self.current_entry:return
         # Never overwrite a stronger byte-identical result with an extraction-level result.
         if self.current_entry.status!='字节相同':self.current_entry.status=value
         self.table.viewport().update()
     def update_view_controls(self):
-        self.standard.setVisible(self.hist_mode.currentText() in ('Y','YUV'));self.standard_label.setVisible(self.hist_mode.currentText() in ('Y','YUV'))
+        text_mode=bool(self.bundle and self.bundle['kind']=='text')
+        for widget in (self.units,self.storage,self.alpha,self.hist_label,self.hist_mode,self.log_hist,self.show_details):widget.setVisible(not text_mode)
+        self.standard.setVisible(self.hist_mode.currentText() in ('Y','YUV') and not (self.bundle and self.bundle['kind']=='text'));self.standard_label.setVisible(self.hist_mode.currentText() in ('Y','YUV') and not (self.bundle and self.bundle['kind']=='text'))
         self.ignore_space.setVisible(bool(self.bundle and self.bundle['kind']=='text'))
         mode=self.view_mode.currentIndex()
-        self.gain.setVisible(mode==2);self.gain_label.setVisible(mode==2)
-        self.mix.setVisible(mode in (3,4));self.mix_label.setVisible(mode in (3,4))
+        self.gain.setVisible(mode==2 and not text_mode);self.gain_label.setVisible(mode==2 and not text_mode)
+        self.mix.setVisible(mode in (3,4) and not text_mode);self.mix_label.setVisible(mode in (3,4) and not text_mode)
         self.mix_label.setText(('混合比例' if mode==3 else '分割位置')+f' {self.mix.value()}%')
         self.mix.setToolTip('调整另一张图的叠加比例，0% 为基准，100% 为另一张图。' if mode==3 else '调整基准图与另一张图的左右分界位置。')
+    def activate_result_mode(self,index):
+        if self.view_mode.currentIndex()==index:self.select_result_mode()
+        else:self.view_mode.setCurrentIndex(index)
     def select_result_mode(self,*_):
         if self.bundle and self.bundle['kind']=='image':self.show_details.setChecked(True)
         self.render_images()
@@ -494,26 +507,22 @@ class Window(QMainWindow):
         for i,p in enumerate(self.panes[:self.active_count()]):
             item=b['images'][i]
             if not item:continue
-            display=item['display'];r=b['comparisons'][i]
-            if i==base:p.stats.setText('基准图 · 其他视图均与此图比较')
-            elif not r:p.stats.setText('基准图缺失，不能计算差异')
-            elif not r['compatible']:p.stats.setText(r['reason'])
-            else:
-                psnr='∞' if np.isinf(r['psnr']) else f'{r["psnr"]:.2f}'
-                p.stats.setText(f'对 {chr(65+base)} · PSNR {psnr} dB  ·  SSIM(Y′) {r["ssim"]:.6f}\nMAE {r["mae"]:.4f}  ·  最大差 {r["max"]:.3f}  ·  超阈值 {r["above"]:,} ({r["above"]/r["total"]*100:.3f}%)')
-                p.stats.setToolTip(f'原尺寸计算；PSNR/MAE 使用 {r["metric_channels"]} 通道，归一化范围 0–1。SSIM 使用所选 Y′ 权重，11×11 高斯窗口 σ=1.5，K1=.01，K2=.03，忽略窗口边界；小图自动缩小窗口。阈值只影响差异分类，不影响 PSNR/SSIM。任意非零差异像素：{r["changed"]:,} / {r["total"]:,}')
-            p.image.set_image(display,preserve=True)
+            p.image.set_image(item['display'],preserve=True)
         self.details.mode=mode;self.details.mix=mix;self.details.gain=gain;self.details.set_bundle(b);self.detail_threshold()
     def render_mix(self,*_):
         self.update_view_controls()
         if self.details.bundle and self.view_mode.currentIndex() in (3,4):
             self.details.mix=self.mix.value()/100;self.details.render()
+    def remember_detail_sizes(self,*_):
+        if not self.focus_active and self.details.isVisible():self.saved_detail_sizes=self.image_split.sizes()
     def details_visibility(self,*_):
         if not hasattr(self,'details'):return
         if self.active_count()==2 and not self.restoring_settings:self.two_image_details=self.show_details.isChecked()
         visible=bool(not self.focus_active and self.bundle and self.bundle['kind']=='image' and self.show_details.isChecked())
         was_visible=self.details.isVisible();self.details.setVisible(visible)
-        if visible and not was_visible:self.image_split.setSizes([max(240,self.image_split.height()-350),350])
+        if visible and not was_visible:
+            height=self.image_split.height();bottom=min(380,max(260,round(height*.45)))
+            self.image_split.setSizes(self.saved_detail_sizes or [max(200,height-bottom),bottom])
         if visible and self.bundle.get('dirty_comparisons') and self.preview_id is None:self.refresh_content(memory_only=True)
     def detail_threshold(self,*_):
         self.details.set_threshold(self.threshold.value(),[255,1023,65535][self.units.currentIndex()])
@@ -573,7 +582,7 @@ class Window(QMainWindow):
         mode=self.hist_mode.currentText()
         if mode!='关闭':self.last_metric_mode=mode
         if self.bundle and self.bundle['kind']=='image' and self.bundle.get('metric_mode')!=self.last_metric_mode:self.schedule_refresh()
-        self.standard.setVisible(self.hist_mode.currentText() in ('Y','YUV'));self.standard_label.setVisible(self.hist_mode.currentText() in ('Y','YUV'))
+        self.standard.setVisible(self.hist_mode.currentText() in ('Y','YUV') and not (self.bundle and self.bundle['kind']=='text'));self.standard_label.setVisible(self.hist_mode.currentText() in ('Y','YUV') and not (self.bundle and self.bundle['kind']=='text'))
         for p in self.panes:
             if p.raw is not None:p.hist.configure(mode=self.hist_mode.currentText(),log=self.log_hist.isChecked());p.hist.setVisible(self.hist_mode.currentText()!='关闭')
     def sync_views(self,index,state):
@@ -590,6 +599,9 @@ class Window(QMainWindow):
             if i!=index:p.text.verticalScrollBar().setValue(value)
         self.text_syncing=False
     def pixel_values(self,x,y):
+        signature=(x,y,tuple(id(p.raw) for p in self.panes[:self.active_count()]))
+        if getattr(self,'last_pixel_signature',None)==signature:return
+        self.last_pixel_signature=signature
         for p in self.panes[:self.active_count()]:p.show_pixel(x,y);p.image.set_cursor_pixel(x,y)
         self.details.set_pixel(x,y)
     def fit_all(self):

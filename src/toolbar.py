@@ -18,12 +18,11 @@ def build_toolbar(window):
         return action
     add('文件','打开文件','file',window.open_files,'Ctrl+O');add('目录','添加文件夹','folder',window.add_folder)
     history=add('历史','最近比较历史','history',lambda:None);menu=QMenu(window);menu.aboutToShow.connect(lambda:window.populate_history(menu));history.triggered.connect(lambda:menu.popup(bar.widgetForAction(history).mapToGlobal(QPoint(0,bar.widgetForAction(history).height()))))
-    add('保存','保存会话','save',window.save_session);add('导出','导出比较列表','export',window.export_list)
     bar.addSeparator();add('比较','开始 / 重新比对','play',window.compare,'Ctrl+R');add('停止','停止','stop',window.cancel_work,'Esc')
     window.toolbar_actions['停止'].setEnabled(window.cancel_button.isEnabled())
     bar.addSeparator();window.mode_actions={};group=QActionGroup(window);group.setExclusive(True)
     for i,(label,key) in enumerate([('容差','heat'),('差值','difference'),('混合','blend'),('分割','wipe')],1):
-        action=add(label,window.view_mode.itemText(i),key,lambda checked=False,j=i:window.view_mode.setCurrentIndex(j));action.setCheckable(True);group.addAction(action);window.mode_actions[i]=action
+        action=add(label,window.view_mode.itemText(i),key,lambda checked=False,j=i:window.activate_result_mode(j));action.setCheckable(True);group.addAction(action);window.mode_actions[i]=action
     window.view_mode.setCurrentIndex(max(1,window.view_mode.currentIndex()));window.mode_actions[window.view_mode.currentIndex()].setChecked(True)
     window.view_mode.currentIndexChanged.connect(lambda i:window.mode_actions[max(1,i)].setChecked(True));window.view_mode.hide()
     bar.addSeparator();add('交换','左右交换当前图片','swap',window.swap_sources)
@@ -31,10 +30,12 @@ def build_toolbar(window):
     add('适应','适应窗口','fit',window.fit_all,'F');add('原大','原始像素 1:1','actual',window.actual_all,'1')
     bar.addSeparator();add('上项','上一项','prev',lambda:window.navigate(-1),'Alt+←');add('下项','下一项','next',lambda:window.navigate(1),'Alt+→')
     add('前差','上一处差异','prevdiff',lambda:window.jump_diff(-1),'Shift+F7');add('后差','下一处差异','nextdiff',lambda:window.jump_diff(1),'F7')
-    bar.addSeparator();add('全屏','全屏查看当前图片组','focus',lambda:window.fullscreen_images(),'F10');add('专注','纯图片专注模式','concentrate',window.focus_mode,'F11');add('示例','打开示例','demo',window.demo);add('帮助','使用说明与快捷键','help',window.help)
+    bar.addSeparator();add('全屏','全屏查看当前图片组','focus',lambda:window.fullscreen_images(),'F10');add('专注','纯图片专注模式','concentrate',window.focus_mode,'F11')
     for name in ['上一处差异','下一处差异']:
         window.toolbar_actions[name].setToolTip(name+'：文本中跳转差异行；文件夹中跳过已确认相同的项目')
     for area in [window.header,window.top,window.controls]:
         for button in area.findChildren(QPushButton):button.hide()
 
     spacer=QWidget();spacer.setSizePolicy(QSizePolicy.Policy.Expanding,QSizePolicy.Policy.Preferred);bar.addWidget(spacer);bar.addWidget(window.settings_toggle)
+
+    window.refresh_command_state()

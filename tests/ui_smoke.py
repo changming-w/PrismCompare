@@ -35,6 +35,12 @@ with tempfile.TemporaryDirectory() as t:
         wait(lambda:w.preview_id is None)
         assert not w.bundle.get('dirty_comparisons')
     w.show_details.setChecked(False)
+    w.mode_actions[w.view_mode.currentIndex()].trigger();app.processEvents()
+    assert w.show_details.isChecked() and w.details.isVisible(), 'Selected mode must reopen hidden panel'
+    w.image_split.setSizes([540,330]);w.remember_detail_sizes();saved_sizes=w.image_split.sizes()
+    w.show_details.setChecked(False);w.show_details.setChecked(True);app.processEvents()
+    assert w.image_split.sizes()==saved_sizes, 'User splitter size must survive hide/show'
+    w.show_details.setChecked(False)
     assert all(w.bundle['images'])
     w.focus_mode();app.processEvents()
     assert w.focus_active and w.isFullScreen() and w.workspace.gap==0

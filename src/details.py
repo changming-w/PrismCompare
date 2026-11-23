@@ -21,7 +21,6 @@ class DetailPanel(QWidget):
         left=QWidget();layout=QVBoxLayout(left);layout.setContentsMargins(6,4,6,4);layout.setSpacing(4)
         row=QHBoxLayout();self.pair=QLabel('基准 A  对');row.addWidget(self.pair);self.target=QComboBox();row.addWidget(self.target);row.addStretch();layout.addLayout(row)
         self.target.currentIndexChanged.connect(self.render)
-        self.offset=QLabel('偏移：(0, 0)');self.offset.setToolTip('按相同像素坐标比较，不进行自动配准。');row.addWidget(self.offset)
         row=QHBoxLayout();self.zoom_label=QLabel('缩放');row.addWidget(self.zoom_label);self.zoom=QSlider(Qt.Orientation.Horizontal);self.zoom.setRange(-200,300);self.zoom.setValue(0);row.addWidget(self.zoom,1)
         self.actual_button=QPushButton('100%');self.actual_button.setFixedWidth(48);self.actual_button.setToolTip('恢复原始像素大小');self.actual_button.clicked.connect(self.actual_requested.emit);row.addWidget(self.actual_button)
         self.fit_button=QPushButton('适应');self.fit_button.setFixedWidth(44);self.fit_button.setToolTip('适应窗口');self.fit_button.clicked.connect(self.fit_requested.emit);row.addWidget(self.fit_button)
@@ -32,7 +31,7 @@ class DetailPanel(QWidget):
         self.threshold.valueChanged.connect(self.threshold_changed.emit);self.threshold_slider.valueChanged.connect(lambda v:self.threshold_changed.emit(float(v)))
         row=QHBoxLayout();self.grids=[];self.readouts=[];self.pixel_titles=[]
         for _ in range(2):
-            column=QVBoxLayout();title=QLabel('像素细节');grid=PixelGrid();readout=QLabel('移动光标查看像素');readout.setWordWrap(True);readout.setMinimumHeight(42)
+            column=QVBoxLayout();title=QLabel('像素细节');grid=PixelGrid();readout=QLabel('移动光标查看像素');readout.setWordWrap(True);readout.setMinimumHeight(30)
             for widget in (title,grid,readout):
                 policy=widget.sizePolicy();policy.setRetainSizeWhenHidden(True);widget.setSizePolicy(policy);widget.hide()
             column.addWidget(title);column.addWidget(grid);column.addWidget(readout);row.addLayout(column);self.grids.append(grid);self.readouts.append(readout);self.pixel_titles.append(title)

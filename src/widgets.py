@@ -3,7 +3,7 @@ from collections import OrderedDict
 from pathlib import Path
 import math,re
 import numpy as np
-from PySide6.QtCore import Qt, QObject, QEvent, Signal, QSize, QRectF, QPointF, QAbstractTableModel, QModelIndex
+from PySide6.QtCore import Qt, QObject, QEvent, Signal, QSize, QRect, QRectF, QPointF, QAbstractTableModel, QModelIndex
 from PySide6.QtGui import QColor,QImage,QPixmap,QPainter,QPainterPath,QPen,QFont,QTextCharFormat,QSyntaxHighlighter,QTextCursor,QTransform
 from PySide6.QtWidgets import QWidget,QGraphicsObject,QGraphicsView,QGraphicsScene,QGraphicsPixmapItem,QVBoxLayout,QHBoxLayout,QLabel,QPlainTextEdit,QStackedWidget,QStyledItemDelegate,QStyle,QTextEdit,QSizePolicy,QToolButton
 from core import IMAGE_EXTS
@@ -112,7 +112,12 @@ class ImageView(QGraphicsView):
         if width:
             x=self.item.mapFromScene(self.mapToScene(point)).x();self.wipe_changed.emit(max(0,min(1,x/width)))
     def set_cursor_pixel(self,x,y):
-        self.cursor_pixel=(x,y);self.viewport().update()
+        if self.cursor_pixel==(x,y):return
+        old=self.cursor_pixel;self.cursor_pixel=(x,y)
+        for point in (old,self.cursor_pixel):
+            if point is not None and self.item.boundingRect().contains(QPointF(point[0]+.5,point[1]+.5)):
+                center=self.mapFromScene(self.item.mapToScene(QPointF(point[0]+.5,point[1]+.5)))
+                self.viewport().update(QRect(center.x()-9,center.y()-9,19,19))
     def drawForeground(self,painter,rect):
         if self.presentation_only:return
         super().drawForeground(painter,rect)
@@ -205,7 +210,9 @@ class PixelGrid(QWidget):
     """Nearest-neighbour pixel neighbourhood, with native numeric readout elsewhere."""
     def __init__(self):
         super().__init__();self.item=None;self.xy=None;self.setFixedSize(90,90)
-    def configure(self,item,xy):self.item=item;self.xy=xy;self.update()
+    def configure(self,item,xy):
+        if self.xy==xy and self.item is item:return
+        self.item=item;self.xy=xy;self.update()
     def paintEvent(self,event):
         p=QPainter(self);p.fillRect(self.rect(),QColor('#151b24'));cell=10
         if self.item is not None and self.xy is not None:

@@ -58,3 +58,6 @@ image_bundle 的 ready 回调只提交已解码的图像快照，随后在工作
 容差使用固定 40ms 调度器而非静止后 debounce，同一时刻只有一个阈值任务，结束后合并处理最新值。rethreshold_bundle 不读取源图，保留 PSNR/SSIM/MAE。fullscreen.py 共享已上传的 QPixmap；shell_bridge.stop 在窗口关闭第一步释放本进程服务端，不能 removeServer 以免误删新进程服务。
 
 0.1.11：color_space.py 共享 RGB/Y/YUV/HSV 投影定义；difference_space 和 difference_basis 标注差异图口径，equal 仍按原始归一化 RGB(A) 判定。metric_table.py 固定尺寸避免数值引起布局变化。focus_controls.py 以根窗口子控件悬浮，不插入布局；专注 mode 隐藏信息叠层，fit 去掉 QGraphicsView 默认 2px 留边。
+
+
+0.1.13: `image_bundle(compute_comparisons=False)` returns a dirty bundle without metrics when the inspector is hidden. Opening it recomputes from memory. RGB/HSV skip unused luma SSIM; transformed-space magnitude caches preserve float64 threshold classification. `tests/test_deferred.py` verifies no hidden computation or source reread. Mouse crosshairs repaint only local rectangles.

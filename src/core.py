@@ -168,9 +168,9 @@ def ssim_luma(base,other,standard='BT.709',storage='auto',cancel=None,channel=No
         valid=score[r:r+end-y,r:w-r];total+=float(valid.sum(dtype=np.float64));count+=valid.size
     return float(np.clip(total/max(1,count),-1,1))
 
-def compare_images(base, other, threshold=0, units=255, storage='auto', alpha=True, cancel=None, standard='BT.709', space='RGB'):
+def compare_images(base, other, threshold=0, units=255, storage='auto', alpha=True, cancel=None, standard='BT.709', space='RGB', calculate_ssim=True):
     if base.shape[:2]!=other.shape[:2]: return {'compatible':False,'reason':'尺寸不同：不拉伸、不进行像素差异计算'}
-    h,w=base.shape[:2];heat=np.zeros((h,w,3),np.uint8);magnitude=np.zeros((h,w),np.float32)
+    h,w=base.shape[:2];heat=np.zeros((h,w,3),np.uint8);magnitude=np.zeros((h,w),np.float32 if space=='RGB' else np.float64)
     changed=above=0;absolute_sum=squared_sum=0.;maximum=0.;has_alpha=alpha and (base.shape[2]==4 or other.shape[2]==4)
     channel_count=(1 if space=='Y' else 3)+int(has_alpha);pixel_equal=True
     for y in range(0,h,128):
@@ -193,7 +193,7 @@ def compare_images(base, other, threshold=0, units=255, storage='auto', alpha=Tr
     count=h*w*channel_count;mse=squared_sum/count
     return {'compatible':True,'heat':heat,'magnitude':magnitude,'changed':changed,'above':above,'total':h*w,
             'mae':absolute_sum/count*units,'max':maximum*units,'psnr':float('inf') if mse==0 else float(-10*np.log10(mse)),
-            'ssim':ssim_luma(base,other,standard,storage,cancel),'metric_channels':channel_count,
+            'ssim':ssim_luma(base,other,standard,storage,cancel) if calculate_ssim else None,'metric_channels':channel_count,
             'equal':pixel_equal,'within':above==0,'units':units,'difference_space':space,'difference_basis':('Y′' if space=='Y' else space)+('+A' if has_alpha else '')}
 
 def rethreshold_bundle(bundle,threshold,units,cancel=None):
@@ -215,7 +215,7 @@ def rethreshold_bundle(bundle,threshold,units,cancel=None):
     return output
 
 
-def image_bundle(paths, baseline, threshold, units, standard, storage, alpha, cancel=None, existing=None, metric_mode=None, ready=None, previous_bundle=None, cache=None, cached_only=False):
+def image_bundle(paths, baseline, threshold, units, standard, storage, alpha, cancel=None, existing=None, metric_mode=None, ready=None, previous_bundle=None, cache=None, cached_only=False, compute_comparisons=True):
     images=[];errors=[]
     for i,p in enumerate(paths):
         checkpoint(cancel)
@@ -223,7 +223,7 @@ def image_bundle(paths, baseline, threshold, units, standard, storage, alpha, ca
         try:
             previous=existing[i] if existing and existing[i] and existing[i]['path']==p else None
             key=cache.key(p,storage,standard) if cache else None
-            if cache and previous and previous.get('cache_key')!=key:previous=None
+            if cache and previous and (previous.get('cache_key') or ())[:4]!=key[:4]:previous=None
             if previous is None and cache:previous=cache.get(key)
             if cached_only and previous is None:raise ValueError('此图片尚未载入')
             raw=previous['raw'] if previous else read_image(p,cancel)
@@ -238,6 +238,8 @@ def image_bundle(paths, baseline, threshold, units, standard, storage, alpha, ca
     for a in images:
         if a and a['hist'] is None:a['hist']=histogram(a['raw'],standard,storage,cancel)
         if a and cache:cache.put(a['cache_key'],a)
+    if not compute_comparisons:
+        return {'kind':'image','images':images,'errors':errors,'comparisons':[None]*len(images),'baseline':baseline,'metric_mode':metric_mode,'threshold':threshold,'dirty_comparisons':True,'parameters':(standard,storage,alpha,metric_mode)}
     comparisons=[]
     for i,a in enumerate(images):
         if i==baseline or not a or not images[baseline]: comparisons.append(None)
@@ -255,10 +257,11 @@ def image_bundle(paths, baseline, threshold, units, standard, storage, alpha, ca
                 if 'selected' in result:
                     result['selected']=dict(result['selected']);result['selected']['mae']*=scale;result['selected']['max']*=scale
                 comparisons.append(result);continue
-            result=compare_images(images[baseline]['raw'],a['raw'],threshold,units,storage,alpha,cancel,standard,space=metric_mode or 'RGB')
+            result=compare_images(images[baseline]['raw'],a['raw'],threshold,units,storage,alpha,cancel,standard,space=metric_mode or 'RGB',calculate_ssim=metric_mode not in ('RGB','HSV'))
             if metric_mode and result['compatible']:
                 from metrics import selected_metrics
                 result['selected']=selected_metrics(images[baseline]['raw'],a['raw'],metric_mode,units,storage,standard,cancel,result['ssim'])
+                result['ssim']=result['selected']['ssim'];result['ssim_basis']=result['selected']['ssim_basis']
             comparisons.append(result)
     return {'kind':'image','images':images,'errors':errors,'comparisons':comparisons,'baseline':baseline,'metric_mode':metric_mode,'threshold':threshold,'parameters':(standard,storage,alpha,metric_mode)}
 

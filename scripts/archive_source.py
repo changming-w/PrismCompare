@@ -1,7 +1,7 @@
 from pathlib import Path
 import zipfile
 root=Path(__file__).resolve().parents[1]
-out=root/'releases';out.mkdir(exist_ok=True);target=out/'PrismCompare-source-0.1.12.zip'
+out=root/'releases';out.mkdir(exist_ok=True);target=out/'PrismCompare-source-0.1.13.zip'
 excluded={'.venv','.tools','build','dist','validation','__pycache__','.git','releases'}
 with zipfile.ZipFile(target,'w',zipfile.ZIP_DEFLATED) as z:
     for p in root.rglob('*'):
