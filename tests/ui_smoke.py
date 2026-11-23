@@ -4,7 +4,7 @@ os.environ.setdefault('QT_QPA_PLATFORM','offscreen')
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'src'))
 from PySide6.QtWidgets import QApplication
 from PySide6.QtTest import QTest
-from PySide6.QtCore import Qt,QPointF
+from PySide6.QtCore import Qt,QPointF,QEvent
 from app import Window,setup_fonts
 from widgets import STYLE
 from demo import create_demo
@@ -25,11 +25,21 @@ with tempfile.TemporaryDirectory() as t:
     root=create_demo(Path(t)/'demo');w=Window();w.theme_combo.setCurrentText('浅色');w.resize(1700,1040);w.show();w.set_paths([str(root/c) for c in 'ABCD'],True)
     wait(lambda:w.bundle and w.bundle['kind']=='image' and w.preview_id is None)
     assert len(w.rows)==5 and w.active_count()==4
+    assert not w.show_details.isChecked() and not w.details.isVisible()
+    from unittest.mock import patch
+    original_raw=[item['raw'] for item in w.bundle['images']];serial=w.serial
+    with patch('core.read_image',side_effect=AssertionError('Swap must not reread images')),patch('core.ImageCache.key',side_effect=AssertionError('Swap must not stat source files')):
+        w.swap_sources();assert w.bundle['images'][0]['raw'] is original_raw[1] and w.serial==serial and w.preview_id is None
+        w.swap_sources();assert w.bundle['images'][0]['raw'] is original_raw[0] and w.serial==serial
+        w.show_details.setChecked(True);assert w.details.isVisible()
+        wait(lambda:w.preview_id is None)
+        assert not w.bundle.get('dirty_comparisons')
+    w.show_details.setChecked(False)
     assert all(w.bundle['images'])
     w.focus_mode();app.processEvents()
     assert w.focus_active and w.isFullScreen() and w.workspace.gap==0
     assert all(not x.isVisible() for x in [w.menuBar(),w.command_toolbar,w.statusBar(),w.sources,w.controls,w.sidebar,w.details])
-    assert all(p.image.presentation_only and p.image.backgroundBrush().color().name()=='#000000' for p in w.panes)
+    assert all(p.image.presentation_only and p.image.backgroundBrush().color().name()=='#404040' for p in w.panes)
     assert w.panes[0].geometry().right()+1==w.panes[1].geometry().left()
     if w.workspace.grid:assert w.panes[0].geometry().bottom()+1==w.panes[2].geometry().top()
     w.grab().save(str(out/'14_focus_images.png'))
@@ -74,6 +84,7 @@ with tempfile.TemporaryDirectory() as t:
     w.mode_actions[1].trigger()
     print('four images loaded',flush=True)
     w.grab().save(str(out/'01_four_images.png'))
+    app.processEvents()
     viewport_sizes=[p.image.viewport().size() for p in w.panes]
     assert all(p.hist.view is p.image and p.hist.width()==180 for p in w.panes)
     fixed=[p.hist.viewport_rect() for p in w.panes]
@@ -202,6 +213,14 @@ with tempfile.TemporaryDirectory() as t:
     w.details.actual_button.click();app.processEvents();assert abs(w.details.view.transform().m11()-1)<.001
     w.details.fit_button.click();app.processEvents();assert w.details.view.fit_mode
     w.details.set_pixel(-1,-1);assert all(not label.text() for label in w.details.readouts)
+    w.pixel_values(100,100);app.processEvents();assert all(g.isVisible() for g in w.details.grids)
+    geometry=w.details.metrics.geometry();w.panes[0].image.leaveEvent(QEvent(QEvent.Type.Leave));app.processEvents()
+    assert all(g.isHidden() for g in w.details.grids) and all(t.isHidden() for t in w.details.pixel_titles)
+    assert w.details.metrics.geometry()==geometry
+    w.focus_mode();app.processEvents();w.focus_controls.reveal();assert w.focus_controls.swap.isVisible()
+    saved=[i['raw'] for i in w.bundle['images']];serial=w.serial
+    w.focus_controls.swap.click();assert w.bundle['images'][0]['raw'] is saved[1] and w.serial==serial
+    w.focus_controls.swap.click();w.escape_action();app.processEvents()
     assert w.table.isColumnHidden(0)
     assert all(p.title.isHidden() and p.meta.isHidden() and p.image.info_title and p.image.info_meta for p in w.panes[:2])
     assert not w.toolbar_actions['停止'].isEnabled()

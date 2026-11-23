@@ -16,6 +16,7 @@ class FocusControls(QObject):
         self.slider=QSlider(Qt.Orientation.Horizontal);self.slider.setRange(-200,300);self.slider.valueChanged.connect(lambda value:window.detail_zoom(100*10**(value/100)));row.addWidget(self.slider,1)
         plus=QPushButton('+');plus.setFixedWidth(30);plus.setToolTip('放大');plus.clicked.connect(lambda:self.step(1.25));row.addWidget(plus)
         self.fit=QPushButton('适应窗口');self.fit.clicked.connect(window.fit_all);row.addWidget(self.fit)
+        self.swap=QPushButton('交换');self.swap.setToolTip('交换当前两张图片，不重新读取文件');self.swap.clicked.connect(window.swap_sources);row.addWidget(self.swap)
         self.actual=QPushButton('100%');self.actual.clicked.connect(window.actual_all);row.addWidget(self.actual)
         self.timer=QTimer(self);self.timer.setSingleShot(True);self.timer.setInterval(180);self.timer.timeout.connect(self.maybe_hide)
         for item in (self.edge,self.bar,self.root):item.installEventFilter(self)
@@ -37,7 +38,7 @@ class FocusControls(QObject):
         self.window.detail_zoom(max(1,min(10000,percent*factor)));self.update_zoom()
     def reveal(self):
         if not self.active:return
-        self.timer.stop();self.update_zoom();self.bar.show();self.place()
+        self.timer.stop();self.swap.setVisible(self.window.active_count()==2);self.update_zoom();self.bar.show();self.place()
     def maybe_hide(self):
         if not self.active:return
         point=QCursor.pos()

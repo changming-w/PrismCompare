@@ -33,6 +33,8 @@ class DetailPanel(QWidget):
         row=QHBoxLayout();self.grids=[];self.readouts=[];self.pixel_titles=[]
         for _ in range(2):
             column=QVBoxLayout();title=QLabel('像素细节');grid=PixelGrid();readout=QLabel('移动光标查看像素');readout.setWordWrap(True);readout.setMinimumHeight(42)
+            for widget in (title,grid,readout):
+                policy=widget.sizePolicy();policy.setRetainSizeWhenHidden(True);widget.setSizePolicy(policy);widget.hide()
             column.addWidget(title);column.addWidget(grid);column.addWidget(readout);row.addLayout(column);self.grids.append(grid);self.readouts.append(readout);self.pixel_titles.append(title)
         layout.addLayout(row)
         layout.addStretch()
@@ -75,7 +77,7 @@ class DetailPanel(QWidget):
             self.metrics.setToolTip('原分辨率计算。差异图、最大差和超阈值计数使用当前通道模式，可包含 Alpha；PSNR/SSIM/MAE 不含 Alpha。容差只影响红蓝分类。')
             if not threshold_only:self.update_zoom(self.view.transform().m11()*100)
         else:
-            reason=result.get('reason','不能计算差异') if result else '来源缺失，不能计算差异';self.caption.setText(reason);self.metrics.setText(reason)
+            reason='正在更新比较指标…' if b.get('dirty_comparisons') else result.get('reason','不能计算差异') if result else '来源缺失，不能计算差异';self.caption.setText(reason);self.metrics.setText(reason)
         if not threshold_only:self.set_pixel(*(self.xy or (-1,-1)))
     def set_pixel(self,x,y):
         self.xy=(x,y)
@@ -84,7 +86,9 @@ class DetailPanel(QWidget):
         if target is None:return
         for slot,index in enumerate([base,target]):
             item=self.bundle['images'][index];self.pixel_titles[slot].setText(f'{chr(65+index)} · 像素细节');self.grids[slot].configure(item,self.xy)
-            if item is None:self.readouts[slot].setText('来源缺失');continue
+            visible=item is not None and 0<=x<item['raw'].shape[1] and 0<=y<item['raw'].shape[0]
+            for widget in (self.pixel_titles[slot],self.grids[slot],self.readouts[slot]):widget.setVisible(visible)
+            if not visible:self.readouts[slot].clear();continue
             raw=item['raw']
             if not(0<=x<raw.shape[1] and 0<=y<raw.shape[0]):self.readouts[slot].clear();continue
             values=raw[y,x];text=f"X:{x} Y:{y}\nRGB:"+','.join(str(int(v)) for v in values[:3])

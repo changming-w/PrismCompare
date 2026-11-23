@@ -39,15 +39,15 @@ class ImageView(QGraphicsView):
         self.viewport().setCursor(Qt.CursorShape.CrossCursor)
         self.setTransformationAnchor(QGraphicsView.ViewportAnchor.NoAnchor)
         self.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform,False)
-    def set_image(self,array,preserve=False):
+    def set_image(self,array,preserve=False,pixmap=None):
         if preserve and self._display_array is array:return
         self._display_array=array
         bounds=self.item.boundingRect()
         if preserve and bounds.width()==array.shape[1] and bounds.height()==array.shape[0]:
             # Same canvas: replace pixels only. Re-fitting/re-centering can round
             # scroll positions and move the image during continuous updates.
-            self.item.setPixmap(QPixmap.fromImage(qimage(array)));self.viewport().update();return
-        state=self.state();self.guard=True;self.item.setPixmap(QPixmap.fromImage(qimage(array)));self.item.setTransformOriginPoint(self.item.boundingRect().center());self.scene_.setSceneRect(self.item.sceneBoundingRect());self.guard=False
+            self.item.setPixmap((pixmap if pixmap is not None else QPixmap.fromImage(qimage(array))));self.viewport().update();return
+        state=self.state();self.guard=True;self.item.setPixmap((pixmap if pixmap is not None else QPixmap.fromImage(qimage(array))));self.item.setTransformOriginPoint(self.item.boundingRect().center());self.scene_.setSceneRect(self.item.sceneBoundingRect());self.guard=False
         if preserve and state:self.apply_state(state)
         else:self.fit(emit=False)
     def fit(self,emit=True):
@@ -88,8 +88,13 @@ class ImageView(QGraphicsView):
         if self.dragging_wipe:
             self.move_wipe(event.position().toPoint());event.accept();return
         self.viewport().setCursor(Qt.CursorShape.SplitHCursor if self.near_wipe(event.position().toPoint()) else Qt.CursorShape.CrossCursor)
-        p=self.item.mapFromScene(self.mapToScene(event.position().toPoint()));self.pixel.emit(math.floor(p.x()),math.floor(p.y()));super().mouseMoveEvent(event)
+        p=self.item.mapFromScene(self.mapToScene(event.position().toPoint()))
+        if self.item.boundingRect().contains(p):self.pixel.emit(math.floor(p.x()),math.floor(p.y()))
+        else:self.pixel.emit(-1,-1)
+        super().mouseMoveEvent(event)
         if event.buttons() & Qt.MouseButton.LeftButton:self.notify()
+    def leaveEvent(self,event):
+        self.pixel.emit(-1,-1);super().leaveEvent(event)
     def mousePressEvent(self,event):
         if event.button()==Qt.MouseButton.LeftButton and self.near_wipe(event.position().toPoint()):
             self.dragging_wipe=True;self.viewport().setCursor(Qt.CursorShape.SplitHCursor);event.accept();return

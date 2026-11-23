@@ -4,13 +4,13 @@ from collections import OrderedDict
 from pathlib import Path
 import cv2,numpy as np
 from PySide6.QtCore import Qt,QObject,Signal,QRunnable,QThreadPool,QSortFilterProxyModel,QTimer,QSettings,QUrl
-from PySide6.QtGui import QPixmap,QImage,QShortcut,QKeySequence,QDesktopServices,QTextCursor,QIcon,QFontDatabase,QFont,QAction,QActionGroup
+from PySide6.QtGui import QPixmap,QImage,QShortcut,QKeySequence,QDesktopServices,QTextCursor,QColor,QIcon,QFontDatabase,QFont,QAction,QActionGroup
 from PySide6.QtWidgets import QApplication,QMainWindow,QWidget,QVBoxLayout,QHBoxLayout,QGridLayout,QLabel,QPushButton,QLineEdit,QComboBox,QCheckBox,QDoubleSpinBox,QSlider,QFrame,QSplitter,QTableView,QAbstractItemView,QHeaderView,QFileDialog,QMessageBox,QProgressBar,QStyleFactory,QMenu,QToolButton
 from core import rethreshold_bundle,ImageCache,Entry,Cancelled,checkpoint,scan_folders,file_entry,IMAGE_EXTS,image_bundle,text_bundle,read_image,display_rgb
 from widgets import SettingsToggle,ComparePane,PaneArea,FileModel,ThumbDelegate,STYLE,LIGHT_STYLE,qimage,COLORS
 from details import DetailPanel
 
-APP_VERSION='0.1.11'
+APP_VERSION='0.1.12'
 
 def setup_fonts(app):
     # Also makes offscreen render tests use the same fonts as the native Windows UI.
@@ -48,6 +48,7 @@ class Window(QMainWindow):
         super().__init__();self.setWindowTitle('Prism Compare · 棱镜比对');self.resize(1560,990);self.setMinimumSize(1160,760);self.setAcceptDrops(True)
         config=Path(os.environ.get('PRISM_CONFIG_DIR',str(Path(os.environ.get('LOCALAPPDATA',str(Path.home())))/'PrismCompare')));config.mkdir(parents=True,exist_ok=True)
         self.settings=QSettings(str(config/'settings.ini'),QSettings.Format.IniFormat);self.pool=QThreadPool(self);self.pool.setMaxThreadCount(2);self.thumb_pool=QThreadPool(self);self.thumb_pool.setMaxThreadCount(2)
+        self.two_image_details=str(self.settings.value('two_image_details',self.settings.value('options/show_details','true'))).lower()=='true';self.restoring_settings=True
         self.jobs={};self.serial=0;self.scan_id=None;self.preview_id=None;self.thumb_jobs={};self.thumb_cache=OrderedDict();self.thumb_pending=set();self.thumb_fail=set();self.generation=0
         self.image_cache=ImageCache();self.last_metric_mode='RGB';self.current_entry=None;self.bundle=None;self.rows=[];self.syncing=False;self.text_syncing=False;self.diff_position=-1;self.closing=False;self.scan_errors=[]
         self.thumb_directory=tempfile.TemporaryDirectory(prefix='PrismCompare-thumbs-')
@@ -56,7 +57,7 @@ class Window(QMainWindow):
         self.threshold_timer=QTimer(self);self.threshold_timer.setInterval(40);self.threshold_timer.timeout.connect(self.update_live_threshold)
         self.debounce=QTimer(self);self.debounce.setSingleShot(True);self.debounce.setInterval(240);self.debounce.timeout.connect(self.refresh_content)
         self.selection_timer=QTimer(self);self.selection_timer.setSingleShot(True);self.selection_timer.setInterval(110);self.selection_timer.timeout.connect(self.load_selected)
-        self.build_ui();self.update_view_controls();self.shortcuts();self.configure_count();self.init_sidebar();self.restore_settings();self.build_menus();self.build_toolbar();self.apply_theme()
+        self.build_ui();self.update_view_controls();self.shortcuts();self.configure_count();self.init_sidebar();self.restore_settings();self.restoring_settings=False;self.show_details.setChecked(self.two_image_details if self.active_count()==2 else False);self.build_menus();self.build_toolbar();self.apply_theme()
         QApplication.styleHints().colorSchemeChanged.connect(self.apply_theme)
     def button(self,label,callback,primary=False):
         b=QPushButton(label);b.clicked.connect(callback)
@@ -157,6 +158,7 @@ class Window(QMainWindow):
         for name,widget in self.preference_widgets().items():
             value=widget.currentText() if isinstance(widget,QComboBox) else widget.isChecked() if isinstance(widget,QCheckBox) else widget.value()
             self.settings.setValue('options/'+name,value)
+        self.settings.setValue('two_image_details',self.two_image_details)
         self.settings.setValue('baseline_index',self.baseline.currentIndex())
         self.settings.setValue('last_metric_mode',self.last_metric_mode);self.settings.sync()
     def record_history(self):
@@ -231,6 +233,7 @@ class Window(QMainWindow):
         if self.scan_id is not None:self.cancel_work()
         n=self.active_count();previous=self.baseline.currentIndex();self.baseline.blockSignals(True);self.baseline.clear();self.baseline.addItems([chr(65+i) for i in range(n)]);self.baseline.setCurrentIndex(min(max(previous,0),n-1));self.baseline.blockSignals(False)
         for i,w in enumerate(self.source_cards):w.setVisible(i<n)
+        self.show_details.setChecked(self.two_image_details if n==2 else False)
         self.refresh_baseline_labels()
         self.layout_panes()
         self.split.setSizes([180+n*94,max(650,self.width()-180-n*94)])
@@ -262,9 +265,9 @@ class Window(QMainWindow):
             self.focus_active=True
             for widget in [self.menuBar(),self.command_toolbar,self.statusBar(),self.sources,self.controls,self.progress,self.details]:widget.hide()
             self.sidebar_controller.focus(True);layout.setContentsMargins(0,0,0,0);layout.setSpacing(0)
-            self.split.setHandleWidth(0);self.image_split.setHandleWidth(0);self.workspace.gap=0;self.workspace.setStyleSheet('background: black;')
+            self.split.setHandleWidth(0);self.image_split.setHandleWidth(0);self.workspace.gap=0;self.workspace.setStyleSheet('background: #404040;')
             for pane in self.panes:
-                pane.image.presentation_only=True;pane.image.setBackgroundBrush(Qt.GlobalColor.black);pane.title.hide();pane.meta.hide();pane.image.viewport().update()
+                pane.image.presentation_only=True;pane.image.setBackgroundBrush(QColor('#404040'));pane.title.hide();pane.meta.hide();pane.image.viewport().update()
             self.workspace.arrange();self.showFullScreen()
             if not hasattr(self,'focus_controls'):
                 from focus_controls import FocusControls
@@ -280,7 +283,7 @@ class Window(QMainWindow):
             for widget in [self.menuBar(),self.command_toolbar,self.statusBar()]:widget.show()
             self.sidebar_controller.focus(False);self.toggle_settings(self.settings_toggle.isChecked());self.details_visibility()
             self.split.restoreState(saved['split']);self.image_split.restoreState(saved['image_split']);self.workspace.arrange()
-            self.progress.setVisible(self.scan_id is not None or (self.preview_id in self.jobs and self.jobs[self.preview_id][2]!='threshold'))
+            self.progress.setVisible(self.scan_id is not None or (self.preview_id in self.jobs and self.jobs[self.preview_id][2] not in ('threshold','recompute')))
     def toggle_settings(self,expanded):
         self.settings_toggle.update()
         for widget in [self.sources,self.controls]:widget.setVisible(expanded and not self.focus_active)
@@ -321,7 +324,7 @@ class Window(QMainWindow):
         if staged:job.fn=lambda cancel,progress:fn(cancel,lambda result:job.signals.partial.emit(ident,result))
         job.signals.partial.connect(self.preview_ready)
         job.signals.done.connect(self.finished);job.signals.failed.connect(self.failed);job.signals.progress.connect(self.job_progress)
-        if kind!='threshold' and not self.focus_active:self.progress.show()
+        if kind not in ('threshold','recompute') and not self.focus_active:self.progress.show()
         self.set_busy(True);self.pool.start(job);return ident
     def set_busy(self,busy):
         busy=busy or (not self.thumbs_paused and bool(self.thumb_pending or self.thumb_position<len(self.thumb_paths)))
@@ -355,6 +358,7 @@ class Window(QMainWindow):
         self.restore_row_name=restore_name;self.image_cache.clear()
         paths=[e.text().strip().strip('"') for e in self.path_edits[:self.active_count()]]
         if not all(paths):QMessageBox.information(self,'选择来源','请先填写当前所有 A–D 来源；或减少比较数量。');return
+        if self.active_count()>2:self.show_details.setChecked(False)
         self.cancel_work();self.clear_results('正在载入…');self.generation+=1;self.thumb_cache.clear();self.thumb_pending.clear();self.thumb_fail.clear()
         for job,_,_ in self.thumb_jobs.values():job.cancel.set()
         self.thumb_pool.clear();self.thumb_jobs.clear()
@@ -383,7 +387,7 @@ class Window(QMainWindow):
             if kind=='threshold':self.details.update_threshold_result(result)
             else:self.show_bundle()
             if result['kind']=='image' and result.get('threshold')!=self.threshold.value():self.threshold_timer.start()
-        self.progress.setVisible(not self.focus_active and (self.scan_id is not None or (self.preview_id in self.jobs and self.jobs[self.preview_id][2]!='threshold'))); self.set_busy(self.scan_id is not None or self.preview_id is not None)
+        self.progress.setVisible(not self.focus_active and (self.scan_id is not None or (self.preview_id in self.jobs and self.jobs[self.preview_id][2] not in ('threshold','recompute')))); self.set_busy(self.scan_id is not None or self.preview_id is not None)
     def failed(self,ident,error):
         self.jobs.pop(ident,None)
         if ident not in (self.scan_id,self.preview_id):return
@@ -433,7 +437,7 @@ class Window(QMainWindow):
         if self.current_entry:self.debounce.start()
     def units_changed(self,*_):
         self.threshold.setMaximum([255,1023,65535][self.units.currentIndex()]);self.schedule_refresh()
-    def refresh_content(self):
+    def refresh_content(self,*,memory_only=False):
         if not self.current_entry:return
         self.cancel_id(self.preview_id);paths=list(getattr(self,'display_paths',self.current_entry.paths));base=self.baseline.currentIndex();present=[p for p in paths if p]
         if not present:return
@@ -443,10 +447,10 @@ class Window(QMainWindow):
             args=(paths,base,self.threshold.value(),[255,1023,65535][self.units.currentIndex()],self.standard.currentText(),'left10' if self.storage.currentIndex()==1 else 'auto',self.alpha.isChecked())
             previous=self.bundle if old else None
             metric_mode=self.hist_mode.currentText() if self.hist_mode.currentText()!='关闭' else self.last_metric_mode
-            self.preview_id=self.submit(lambda cancel,ready:image_bundle(*args,cancel=cancel,existing=old,metric_mode=metric_mode,ready=ready,previous_bundle=previous,cache=self.image_cache),'preview',staged=True)
+            self.preview_id=self.submit(lambda cancel,ready:image_bundle(*args,cancel=cancel,existing=old,metric_mode=metric_mode,ready=None if memory_only else ready,previous_bundle=previous,cache=None if memory_only else self.image_cache,cached_only=memory_only),'recompute' if memory_only else 'preview',staged=not memory_only)
         else:
             ignore=self.ignore_space.isChecked();self.preview_id=self.submit(lambda cancel,_:text_bundle(paths,base,ignore,cancel),'preview')
-        self.statusBar().showMessage('正在比较 · 可继续操作，或按 Esc 停止')
+        self.statusBar().showMessage('正在更新指标 · 使用已缓存的图片' if memory_only else '正在比较 · 可继续操作，或按 Esc 停止')
     def show_bundle(self):
         b=self.bundle;n=self.active_count()
         if self.focus_active and b['kind']!='image':self.focus_mode()
@@ -506,9 +510,11 @@ class Window(QMainWindow):
             self.details.mix=self.mix.value()/100;self.details.render()
     def details_visibility(self,*_):
         if not hasattr(self,'details'):return
+        if self.active_count()==2 and not self.restoring_settings:self.two_image_details=self.show_details.isChecked()
         visible=bool(not self.focus_active and self.bundle and self.bundle['kind']=='image' and self.show_details.isChecked())
         was_visible=self.details.isVisible();self.details.setVisible(visible)
         if visible and not was_visible:self.image_split.setSizes([max(240,self.image_split.height()-350),350])
+        if visible and self.bundle.get('dirty_comparisons') and self.preview_id is None:self.refresh_content(memory_only=True)
     def detail_threshold(self,*_):
         self.details.set_threshold(self.threshold.value(),[255,1023,65535][self.units.currentIndex()])
     def detail_zoom(self,percent):
@@ -520,15 +526,26 @@ class Window(QMainWindow):
         n=self.active_count();left=0 if n==2 else self.baseline.currentIndex()
         right=1 if n==2 else self.details.target.currentData()
         if right is None or right==left or right>=n:right=next(i for i in range(n) if i!=left)
-        pending=self.preview_id is not None or self.debounce.isActive();self.debounce.stop()
+        pending=self.preview_id is not None or self.debounce.isActive();self.debounce.stop();self.threshold_timer.stop()
+        self.cancel_id(self.preview_id);self.preview_id=None
+        self.bundle=dict(self.bundle)
+        for key in ['images','errors','comparisons']:self.bundle[key]=list(self.bundle[key])
+        pixmaps={left:self.panes[left].image.item.pixmap(),right:self.panes[right].image.item.pixmap()}
         self.display_paths[left],self.display_paths[right]=self.display_paths[right],self.display_paths[left]
         for key in ['images','errors']:
             items=self.bundle[key];items[left],items[right]=items[right],items[left]
-        if n==2 and not pending:
-            # Absolute difference and these metrics are symmetric: reuse the
-            # loaded pixels and results without any scan, read or calculation.
-            self.show_bundle()
-        else:self.refresh_content()
+        for dest,source in [(left,right),(right,left)]:
+            item=self.bundle['images'][dest]
+            if item:self.panes[dest].image.set_image(item['display'],preserve=True,pixmap=pixmaps[source])
+        if n>2 or pending:
+            valid_pair=self.bundle['comparisons'][right] if n>2 and not pending else None
+            self.bundle['comparisons']=[None]*n
+            if n>2:self.bundle['comparisons'][right]=valid_pair
+            self.bundle['dirty_comparisons']=True
+        self.progress.hide();self.show_bundle()
+        if self.bundle.get('dirty_comparisons') and not self.show_details.isChecked():
+            self.statusBar().showMessage('已交换当前图片 · 打开底部对比区时计算新的基准关系')
+        self.set_busy(self.preview_id is not None)
     def image_context_menu(self,index,pos=None):
         view=self.panes[index].image;menu=QMenu(self)
         commands=[('全屏查看',lambda:self.fullscreen_images(index)),('设为基准',lambda:self.baseline.setCurrentIndex(index)),('自动缩放（对齐基准）',self.align_to_baseline),('适应窗口',lambda:view.fit()),('原始大小（1:1）',lambda:view.actual()),('水平缩放（适应宽度）',view.fit_width),None,

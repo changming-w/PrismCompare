@@ -215,7 +215,7 @@ def rethreshold_bundle(bundle,threshold,units,cancel=None):
     return output
 
 
-def image_bundle(paths, baseline, threshold, units, standard, storage, alpha, cancel=None, existing=None, metric_mode=None, ready=None, previous_bundle=None, cache=None):
+def image_bundle(paths, baseline, threshold, units, standard, storage, alpha, cancel=None, existing=None, metric_mode=None, ready=None, previous_bundle=None, cache=None, cached_only=False):
     images=[];errors=[]
     for i,p in enumerate(paths):
         checkpoint(cancel)
@@ -225,6 +225,7 @@ def image_bundle(paths, baseline, threshold, units, standard, storage, alpha, ca
             key=cache.key(p,storage,standard) if cache else None
             if cache and previous and previous.get('cache_key')!=key:previous=None
             if previous is None and cache:previous=cache.get(key)
+            if cached_only and previous is None:raise ValueError('此图片尚未载入')
             raw=previous['raw'] if previous else read_image(p,cancel)
             display=previous['display'] if previous and previous.get('storage')==storage else display_rgb(raw,storage)
             hist=previous['hist'] if previous and previous.get('storage')==storage and previous.get('standard')==standard else None
