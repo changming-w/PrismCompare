@@ -29,5 +29,15 @@ class DeferredTests(unittest.TestCase):
                 second=core.image_bundle(*args,'BT.2020','left10',True,existing=first['images'],cache=cache,compute_comparisons=False)
             self.assertIs(first['images'][0]['raw'],second['images'][0]['raw'])
             self.assertEqual(second['images'][0]['storage'],'left10')
+    def test_each_original_is_delivered_before_later_decodes_and_analysis(self):
+        reports=[]
+        def decode(path,cancel):
+            if path=='b.png':self.assertEqual([event[0] for event in reports],[0])
+            return np.zeros((16,16,3),np.uint8)
+        with patch('core.read_image',side_effect=decode),patch('core.histogram',side_effect=AssertionError('histograms disabled')),patch('core.compare_images',side_effect=AssertionError('comparisons disabled')):
+            result=core.image_bundle(['a.png','b.png'],0,0,255,'BT.709','auto',True,
+                image_ready=lambda *event:reports.append(event),compute_comparisons=False,compute_histograms=False)
+        self.assertEqual([item['path'] for _,item,_ in reports],['a.png','b.png'])
+        self.assertTrue(result['dirty_comparisons'])
 
 if __name__=='__main__':unittest.main()

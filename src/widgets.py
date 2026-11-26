@@ -3,12 +3,15 @@ from collections import OrderedDict
 from pathlib import Path
 import math,re
 import numpy as np
-from PySide6.QtCore import Qt, QObject, QEvent, Signal, QSize, QRect, QRectF, QPointF, QAbstractTableModel, QModelIndex
-from PySide6.QtGui import QColor,QImage,QPixmap,QPainter,QPainterPath,QPen,QFont,QTextCharFormat,QSyntaxHighlighter,QTextCursor,QTransform
-from PySide6.QtWidgets import QWidget,QGraphicsObject,QGraphicsView,QGraphicsScene,QGraphicsPixmapItem,QVBoxLayout,QHBoxLayout,QLabel,QPlainTextEdit,QStackedWidget,QStyledItemDelegate,QStyle,QTextEdit,QSizePolicy,QToolButton
+from PySide6.QtCore import Qt, QObject, QEvent, Signal, QSize, QRect, QRectF, QPointF, QAbstractTableModel, QModelIndex,QMimeData
+from PySide6.QtGui import QColor,QImage,QPixmap,QPainter,QPainterPath,QPen,QFont,QTextCharFormat,QSyntaxHighlighter,QTextCursor,QTransform,QDrag
+from PySide6.QtWidgets import QApplication,QWidget,QGraphicsObject,QGraphicsView,QGraphicsScene,QGraphicsPixmapItem,QVBoxLayout,QHBoxLayout,QLabel,QPlainTextEdit,QStackedWidget,QStyledItemDelegate,QStyle,QTextEdit,QSizePolicy,QToolButton
 from core import IMAGE_EXTS
 
-COLORS=['#7ca9ff','#54dbb0','#ffca72','#cf9eff']
+WORKSPACE_BACKGROUND='#2b2d30'
+WORKSPACE_DIVIDER='#414448'
+
+PANE_MIME='application/x-prism-compare-pane'
 
 class SettingsToggle(QToolButton):
     """Flat disclosure button with a drawn chevron (no font glyph dependency)."""
@@ -33,9 +36,11 @@ class ImageView(QGraphicsView):
         super().__init__(parent);self.scene_=QGraphicsScene(self);self.setScene(self.scene_)
         self.presentation_only=False;self.info_title='';self.info_meta='';self._display_array=None;self.histogram=None;self.wipe_fraction=None;self.dragging_wipe=False;self.setViewportUpdateMode(QGraphicsView.ViewportUpdateMode.FullViewportUpdate)
         self.item=QGraphicsPixmapItem();self.scene_.addItem(self.item);self.guard=False;self.fit_mode=True
-        self.setBackgroundBrush(QColor('#10141b'));self.setFrameShape(QGraphicsView.Shape.NoFrame)
+        self.setBackgroundBrush(QColor(WORKSPACE_BACKGROUND));self.setFrameShape(QGraphicsView.Shape.NoFrame)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff);self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff);self.setMinimumHeight(30)
         self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag);self.setMouseTracking(True);self.cursor_pixel=None
+        self.reorder_enabled=False
+        self.reorder_start=None
         self.viewport().setCursor(Qt.CursorShape.CrossCursor)
         self.setTransformationAnchor(QGraphicsView.ViewportAnchor.NoAnchor)
         self.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform,False)
@@ -85,6 +90,16 @@ class ImageView(QGraphicsView):
         before=self.mapToScene(event.position().toPoint());self.guard=True;self.fit_mode=False;self.scale(factor,factor)
         after=self.mapToScene(event.position().toPoint());self.translate(after.x()-before.x(),after.y()-before.y());self.guard=False;self.notify();event.accept()
     def mouseMoveEvent(self,event):
+        if self.reorder_start is not None:
+            distance=(event.position().toPoint()-self.reorder_start).manhattanLength()
+            if event.buttons() & Qt.MouseButton.LeftButton and distance>=QApplication.startDragDistance():
+                self.reorder_start=None
+                mime=QMimeData();mime.setData(PANE_MIME,b'1')
+                drag=QDrag(self);drag.setMimeData(mime)
+                drag.setPixmap(self.item.pixmap().scaled(144,96,Qt.AspectRatioMode.KeepAspectRatio,Qt.TransformationMode.SmoothTransformation))
+                drag.exec(Qt.DropAction.MoveAction)
+            event.accept()
+            return
         if self.dragging_wipe:
             self.move_wipe(event.position().toPoint());event.accept();return
         self.viewport().setCursor(Qt.CursorShape.SplitHCursor if self.near_wipe(event.position().toPoint()) else Qt.CursorShape.CrossCursor)
@@ -96,10 +111,20 @@ class ImageView(QGraphicsView):
     def leaveEvent(self,event):
         self.pixel.emit(-1,-1);super().leaveEvent(event)
     def mousePressEvent(self,event):
+        if event.button()==Qt.MouseButton.LeftButton and self.reorder_enabled and (self.fit_mode or event.modifiers() & Qt.KeyboardModifier.AltModifier):
+            point=self.item.mapFromScene(self.mapToScene(event.position().toPoint()))
+            if self.item.boundingRect().contains(point):
+                self.reorder_start=event.position().toPoint()
+                event.accept()
+                return
         if event.button()==Qt.MouseButton.LeftButton and self.near_wipe(event.position().toPoint()):
             self.dragging_wipe=True;self.viewport().setCursor(Qt.CursorShape.SplitHCursor);event.accept();return
         super().mousePressEvent(event);self.viewport().setCursor(Qt.CursorShape.CrossCursor)
     def mouseReleaseEvent(self,event):
+        if self.reorder_start is not None:
+            self.reorder_start=None
+            event.accept()
+            return
         if self.dragging_wipe:
             self.move_wipe(event.position().toPoint());self.dragging_wipe=False;event.accept();return
         super().mouseReleaseEvent(event);self.viewport().setCursor(Qt.CursorShape.CrossCursor)
@@ -185,8 +210,8 @@ class Histogram(QObject):
         self.update()
     def paint(self,p,option,widget=None):
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        p.setPen(QPen(QColor(255,255,255,45),1));p.setBrush(QColor(245,248,252,45))
-        p.drawRoundedRect(self.boundingRect().adjusted(.5,.5,-.5,-.5),5,5)
+        p.setPen(Qt.PenStyle.NoPen);p.setBrush(QColor(245,248,252,45))
+        p.drawRoundedRect(self.boundingRect(),5,5)
         rect=QRectF(8,23,max(1,self.width()-16),max(1,self.height()-31))
         keys=list(self.mode) if self.mode in ('RGB','HSV') else ['Y','Cb','Cr'] if self.mode=='YUV' else ['Y']
         colors={'R':'#da5269','G':'#329f72','B':'#488cdb','Cb':'#488cdb','Cr':'#da5269','Y':'#927c42','H':'#a36cd4','S':'#39a99d','V':'#c99d48'}
@@ -208,13 +233,13 @@ class Histogram(QObject):
 
 class PixelGrid(QWidget):
     """Nearest-neighbour pixel neighbourhood, with native numeric readout elsewhere."""
-    def __init__(self):
-        super().__init__();self.item=None;self.xy=None;self.setFixedSize(90,90)
+    def __init__(self,cell=10):
+        super().__init__();self.item=None;self.xy=None;self.cell=cell;self.setFixedSize(9*cell,9*cell)
     def configure(self,item,xy):
         if self.xy==xy and self.item is item:return
         self.item=item;self.xy=xy;self.update()
     def paintEvent(self,event):
-        p=QPainter(self);p.fillRect(self.rect(),QColor('#151b24'));cell=10
+        p=QPainter(self);p.fillRect(self.rect(),QColor('#151b24'));cell=self.cell
         if self.item is not None and self.xy is not None:
             x,y=self.xy;display=self.item['display'];h,w=display.shape[:2]
             for row in range(9):
@@ -222,11 +247,11 @@ class PixelGrid(QWidget):
                     xx,yy=x+col-4,y+row-4
                     if 0<=x<w and 0<=y<h and 0<=xx<w and 0<=yy<h:
                         rgb=display[yy,xx,:3];p.fillRect(col*cell,row*cell,cell,cell,QColor(*map(int,rgb)))
-        p.setPen(QColor('#48515d'))
+        p.setPen(QColor(125,146,169,94))
         for i in range(10):
-            p.drawLine(i*cell,0,i*cell,90);p.drawLine(0,i*cell,90,i*cell)
-        p.setPen(QPen(QColor('#000000'),3));p.drawRect(40,40,10,10)
-        p.setPen(QPen(QColor('#ffffff'),1));p.drawRect(40,40,10,10)
+            p.drawLine(i*cell,0,i*cell,self.height());p.drawLine(0,i*cell,self.width(),i*cell)
+        p.setPen(QPen(QColor('#000000'),3));p.drawRect(4*cell,4*cell,cell,cell)
+        p.setPen(QPen(QColor('#ffffff'),1));p.drawRect(4*cell,4*cell,cell,cell)
 
 class CodeHighlighter(QSyntaxHighlighter):
     def __init__(self,document):
@@ -242,7 +267,7 @@ class ComparePane(QWidget):
     def __init__(self,index):
         super().__init__();self.index=index;self.raw=None;self.light=True;self.text_columns=None;self.setSizePolicy(QSizePolicy.Policy.Ignored,QSizePolicy.Policy.Ignored)
         lay=QVBoxLayout(self);lay.setContentsMargins(0,0,0,0);lay.setSpacing(0)
-        self.title=QLabel(f'  {chr(65+index)}  ·  尚未选择文件');self.title.setObjectName('paneTitle');self.title.setStyleSheet(f'border-top: 3px solid {COLORS[index]};');self.title.setMinimumHeight(38);self.title.setTextFormat(Qt.TextFormat.PlainText)
+        self.title=QLabel(f'  {chr(65+index)}  ·  尚未选择文件');self.title.setObjectName('paneTitle');self.title.setMinimumHeight(38);self.title.setTextFormat(Qt.TextFormat.PlainText)
         self.meta=QLabel('');self.meta.setObjectName('meta');self.meta.setWordWrap(True);self.meta.setTextFormat(Qt.TextFormat.PlainText)
         self.stack=QStackedWidget();self.image=ImageView();self.text=QPlainTextEdit();self.text.setReadOnly(True);self.text.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap);self.text.setFont(QFont('Cascadia Mono',10));self.text.setObjectName('codeEditor');self.highlighter=CodeHighlighter(self.text.document())
         self.empty=QLabel('选择文件，开始比对');self.empty.setAlignment(Qt.AlignmentFlag.AlignCenter);self.empty.setWordWrap(True);self.empty.setObjectName('empty');self.empty.setTextFormat(Qt.TextFormat.PlainText)
@@ -278,15 +303,21 @@ class ComparePane(QWidget):
 
 class PaneArea(QWidget):
     """Equal-sized viewports independent of wrapped label size hints."""
+    DIVIDER_WIDTH=1
+
     def __init__(self):
-        super().__init__();self.panes=[];self.count=2;self.grid=False;self.gap=5;self.setMinimumSize(250,200)
+        super().__init__();self.panes=[];self.count=2;self.grid=False;self.gap=self.DIVIDER_WIDTH;self.setMinimumSize(250,200)
+        self.setObjectName('imageWorkspace')
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground)
     def arrange(self):
         rows=2 if self.grid and self.count>2 else 1;cols=2 if self.grid else self.count;gap=self.gap
         width=(self.width()-(cols-1)*gap)/cols;height=(self.height()-(rows-1)*gap)/rows
         for i,p in enumerate(self.panes):
             p.setVisible(i<self.count)
             if i<self.count:
-                row=i//cols;col=i%cols;x=round(col*(width+gap));y=round(row*(height+gap));right=round((col+1)*width+col*gap);bottom=round((row+1)*height+row*gap)
+                row=i//cols;col=i%cols
+                x=round(col*width)+col*gap;y=round(row*height)+row*gap
+                right=round((col+1)*width)+col*gap;bottom=round((row+1)*height)+row*gap
                 p.setGeometry(x,y,right-x,bottom-y)
     def resizeEvent(self,event):super().resizeEvent(event);self.arrange()
 
@@ -329,7 +360,13 @@ class ThumbDelegate(QStyledItemDelegate):
 STYLE='''
 QMainWindow, QWidget { background: #101722; color: #dce5f2; font-family: "Segoe UI", "Microsoft YaHei UI"; font-size: 12px; }
 QToolTip { background: #28374b; color: #e8f0fa; border: 1px solid #536882; padding: 6px; }
-QFrame#toolbar { background: #182231; border-bottom: 1px solid #2b394d; }
+QMenuBar { background: #162131; color: #dce5f2; border: none; }
+QMenuBar::item { background: transparent; color: #dce5f2; padding: 5px 10px; }
+QMenuBar::item:selected, QMenuBar::item:pressed, QMenu::item:selected { background: #304963; color: #f5f8ff; }
+QMenu { background: #202b3b; color: #dce5f2; border: none; padding: 5px; }
+QMenu::item { padding: 6px 24px; }
+QMenu::item:disabled, QMenuBar::item:disabled { color: #8497b1; }
+QFrame#toolbar { background: #182231; }
 QLabel#brand { color: #edf4ff; font-size: 22px; font-weight: 700; background: transparent; }
 QLabel#subtitle { color: #8398b3; background: transparent; }
 QLabel#paneTitle { background: #1b2635; color: #e5edf7; font-weight: 600; }
@@ -337,29 +374,33 @@ QLabel#meta { background: #17202d; color: #899db7; padding: 5px 8px; font-size: 
 QLabel#pixel { background: #15202c; color: #9eb5d0; font-size: 11px; padding: 2px; }
 QLabel#stats { background: #1b2635; color: #b3c5dc; padding: 7px; font-size: 11px; }
 QLabel#empty { color: #8497b1; font-size: 15px; padding: 20px; }
-QPushButton { background: #253449; border: 1px solid #354860; border-radius: 5px; padding: 7px 12px; }
-QPushButton:hover { background: #324965; border-color: #597ba5; }
+QPushButton { background: #243144; border: 1px solid transparent; border-radius: 5px; padding: 7px 12px; }
+QPushButton:hover { background: #30425a; }
+QPushButton:focus { border-color: #7897bd; }
 QPushButton:pressed { background: #172b43; }
 QPushButton:disabled { color: #60718a; background: #1c2735; }
-QPushButton#primary { background: #447ef5; border-color: #6596ff; color: white; font-weight: 600; }
+QPushButton#primary { background: #447ef5; color: white; font-weight: 600; }
 QPushButton#primary:hover { background: #568cff; }
-QLineEdit, QComboBox, QDoubleSpinBox { background: #0f1824; border: 1px solid #34445c; border-radius: 4px; padding: 6px; selection-background-color: #3766a0; }
-QLineEdit:focus, QComboBox:focus { border-color: #76a5ff; }
+QLineEdit, QComboBox, QDoubleSpinBox { background: #1b2534; border: 1px solid transparent; border-radius: 5px; padding: 6px; selection-background-color: #3766a0; }
+QLineEdit:hover, QComboBox:hover, QDoubleSpinBox:hover { background: #223044; }
+QLineEdit:focus, QComboBox:focus, QDoubleSpinBox:focus { border-color: #7897bd; }
 QComboBox::drop-down { width: 20px; border: 0; }
-QComboBox QAbstractItemView { background: #1b293b; selection-background-color: #355479; }
+QComboBox QAbstractItemView { background: #1b293b; color: #dce5f2; selection-background-color: #355479; selection-color: #f5f8ff; }
 QCheckBox { spacing: 6px; background: transparent; }
-QCheckBox::indicator { width: 15px; height: 15px; border: 1px solid #536b89; border-radius: 3px; background: #172334; }
-QCheckBox::indicator:checked { background: #5989f2; border-color: #7ca7ff; }
-QTableView { background: #141e2b; alternate-background-color: #182232; gridline-color: #273548; border: none; selection-background-color: #294568; }
-QTableView::item { padding: 5px; border-bottom: 1px solid #253246; }
-QHeaderView::section { background: #223045; color: #9bb0cb; border: none; border-right: 1px solid #34435a; padding: 8px 4px; }
+QCheckBox::indicator { width: 15px; height: 15px; border: 1px solid transparent; border-radius: 4px; background: #304159; }
+QCheckBox::indicator:checked { background: #5989f2; }
+QCheckBox::indicator:focus { border-color: #7897bd; }
+QTableView { background: #141e2b; alternate-background-color: #182232; border: none; selection-background-color: #294568; }
+QTableView::item { padding: 5px; border: none; }
+QHeaderView::section { background: #1c2838; color: #a9bdd7; border: none; padding: 8px 4px; }
 QPlainTextEdit#codeEditor { background: #111a26; color: #ccd9ea; border: 0; selection-background-color: #405f87; }
-QSplitter::handle { background: #29364a; width: 4px; height: 4px; }
+QSplitter::handle { background: transparent; width: 4px; height: 4px; }
 QStatusBar { background: #182437; color: #a6bad4; }
 QScrollBar:vertical { background: #151f2c; width: 11px; margin: 0; }
 QScrollBar::handle:vertical { background: #3a4c65; min-height: 30px; border-radius: 5px; }
 QScrollBar:horizontal { background: #151f2c; height: 11px; margin: 0; }
 QScrollBar::handle:horizontal { background: #3a4c65; min-width: 30px; border-radius: 5px; }
+QScrollBar::add-page, QScrollBar::sub-page { background: #151f2c; }
 QScrollBar::add-line, QScrollBar::sub-line { width: 0; height: 0; }
 QSlider::groove:horizontal { background: #293b53; height: 5px; border-radius: 2px; }
 QSlider::handle:horizontal { background: #86adff; width: 13px; margin: -5px 0; border-radius: 6px; }
@@ -368,46 +409,74 @@ QProgressBar::chunk { background: #6895f8; }
 '''
 
 LIGHT_STYLE='''
-QMainWindow, QWidget { background: #f3f3f3; color: #202020; font-family: "Segoe UI", "Microsoft YaHei UI"; font-size: 12px; }
+QMainWindow, QWidget { background: #f3f6fa; color: #253142; font-family: "Segoe UI", "Microsoft YaHei UI"; font-size: 12px; }
 QToolTip { background: #ffffff; color: #202020; border: 1px solid #c8c8c8; padding: 6px; }
-QMenuBar { background: #f3f3f3; border-bottom: 1px solid #dedede; }
+QMenuBar { background: #f9fbfe; border: none; }
 QMenuBar::item { background: transparent; padding: 5px 10px; }
-QMenuBar::item:selected, QMenu::item:selected { background: #e5edf7; }
-QMenu { background: white; border: 1px solid #d6d6d6; padding: 4px; }
+QMenuBar::item:selected, QMenuBar::item:pressed, QMenu::item:selected { background: #dceaff; color: #173959; }
+QMenu { background: white; border: none; padding: 5px; }
 QMenu::item { padding: 6px 24px; }
 QLabel#brand { color: #202020; font-size: 19px; font-weight: 600; background: transparent; }
 QLabel#subtitle { color: #6c6c6c; background: transparent; }
-QLabel#paneTitle { background: #f7f7f7; color: #25334a; font-weight: 600; border-bottom: 1px solid #e2e2e2; }
+QLabel#paneTitle { background: #ebf1f8; color: #25334a; font-weight: 600; }
 QLabel#meta { background: #ffffff; color: #606a77; padding: 4px 8px; font-size: 11px; }
 QLabel#pixel { background: #fafafa; color: #526172; font-size: 11px; padding: 2px; }
-QLabel#stats { background: #f5f7fa; color: #314155; border-top: 1px solid #e2e6ec; padding: 7px; font-size: 11px; }
+QLabel#stats { background: #f5f7fa; color: #314155; padding: 7px; font-size: 11px; }
 QLabel#empty { background: #ffffff; color: #727b87; font-size: 14px; padding: 20px; }
-QPushButton { background: #ffffff; border: 1px solid #d2d2d2; border-bottom-color: #bdbdbd; border-radius: 4px; padding: 6px 11px; }
-QPushButton:hover { background: #f8f8f8; border-color: #a8bacd; }
+QPushButton { background: #e5edf6; border: 1px solid transparent; border-radius: 5px; padding: 6px 11px; }
+QPushButton:hover { background: #dce8f7; }
 QPushButton:pressed { background: #ebebeb; color: #545454; }
 QPushButton:focus { border: 1px solid #0067c0; }
-QPushButton:disabled { background: #f0f0f0; color: #a0a0a0; border-color: #dedede; }
-QPushButton#primary { background: #0067c0; border-color: #0067c0; color: #ffffff; font-weight: 600; }
+QPushButton:disabled { background: #eef2f7; color: #8793a3; }
+QPushButton#primary { background: #0067c0; color: #ffffff; font-weight: 600; }
 QPushButton#primary:hover { background: #1975c5; }
-QLineEdit, QComboBox, QDoubleSpinBox { background: #ffffff; color: #202020; border: 1px solid #d4d4d4; border-bottom-color: #8e8e8e; border-radius: 3px; padding: 5px; selection-background-color: #cce4ff; selection-color: #202020; }
-QLineEdit:focus, QComboBox:focus, QDoubleSpinBox:focus { border-bottom: 2px solid #0067c0; }
+QLineEdit, QComboBox, QDoubleSpinBox { background: #e7edf5; color: #253142; border: 1px solid transparent; border-radius: 5px; padding: 5px; selection-background-color: #cce4ff; selection-color: #202020; }
+QLineEdit:hover, QComboBox:hover, QDoubleSpinBox:hover { background: #dee8f4; }
+QLineEdit:focus, QComboBox:focus, QDoubleSpinBox:focus { border-color: #6694bf; }
 QComboBox QAbstractItemView { background: white; color: #202020; selection-background-color: #e3effb; selection-color: #202020; }
 QCheckBox { spacing: 5px; background: transparent; }
-QCheckBox::indicator { width: 15px; height: 15px; border: 1px solid #858585; border-radius: 3px; background: #ffffff; }
-QCheckBox::indicator:checked { background: #0067c0; border-color: #0067c0; }
-QTableView { background: #ffffff; alternate-background-color: #fafbfc; border: 1px solid #dedede; gridline-color: #e8ebef; selection-background-color: #e2eefb; selection-color: #202020; }
-QTableView::item { padding: 5px; border-bottom: 1px solid #edf0f3; }
-QHeaderView::section { background: #f4f5f7; color: #4b5665; border: none; border-right: 1px solid #e0e4e9; border-bottom: 1px solid #d8dde4; padding: 8px 4px; }
+QCheckBox::indicator { width: 15px; height: 15px; border: 1px solid transparent; border-radius: 4px; background: #d2deed; }
+QCheckBox::indicator:checked { background: #0067c0; }
+QCheckBox::indicator:focus { border-color: #6694bf; }
+QTableView { background: #ffffff; alternate-background-color: #f3f6fa; border: none; selection-background-color: #e2eefb; selection-color: #202020; }
+QTableView::item { padding: 5px; border: none; }
+QHeaderView::section { background: #eaf0f7; color: #4b5665; border: none; padding: 8px 4px; }
 QPlainTextEdit#codeEditor { background: #ffffff; color: #283441; border: none; selection-background-color: #cee5ff; selection-color: #172b42; }
-QSplitter::handle { background: #e0e3e7; width: 4px; height: 4px; }
-QStatusBar { background: #f7f7f7; color: #576474; border-top: 1px solid #dedede; }
+QSplitter::handle { background: transparent; width: 4px; height: 4px; }
+QStatusBar { background: #f3f6fa; color: #576474; }
 QScrollBar:vertical { background: #f5f5f5; width: 11px; margin: 0; }
 QScrollBar::handle:vertical { background: #b4bbc4; min-height: 30px; border-radius: 5px; }
 QScrollBar:horizontal { background: #f5f5f5; height: 11px; margin: 0; }
 QScrollBar::handle:horizontal { background: #b4bbc4; min-width: 30px; border-radius: 5px; }
+QScrollBar::add-page, QScrollBar::sub-page { background: #f5f5f5; }
 QScrollBar::add-line, QScrollBar::sub-line { width: 0; height: 0; }
 QSlider::groove:horizontal { background: #c5cbd3; height: 4px; border-radius: 2px; }
 QSlider::handle:horizontal { background: #0067c0; width: 13px; margin: -5px 0; border: 2px solid white; border-radius: 7px; }
 QProgressBar { border: 0; background: #e4e8ed; max-height: 3px; }
 QProgressBar::chunk { background: #0067c0; }
 '''
+
+WORKSPACE_STYLE=f'''
+QWidget#imageWorkspace {{ background: {WORKSPACE_DIVIDER}; }}
+QWidget#imageWorkspace QLabel#empty {{ background: {WORKSPACE_BACKGROUND}; color: #bfc3c7; }}
+QWidget#comparisonSurface, QWidget#comparisonPanel, QTableView#comparisonMetrics,
+QScrollArea#comparisonControls, QScrollArea#comparisonControls QScrollBar:vertical,
+QScrollArea#comparisonControls QScrollBar::add-page:vertical,
+QScrollArea#comparisonControls QScrollBar::sub-page:vertical {{ background: {WORKSPACE_BACKGROUND}; color: #e7e8ea; }}
+QWidget#comparisonPanel QLabel {{ background: transparent; color: #e7e8ea; }}
+QWidget#comparisonPanel QLabel#resultCaption {{ color: #d7dbe0; font-weight: 600; padding-left: 3px; }}
+QWidget#comparisonPanel QComboBox, QWidget#comparisonPanel QDoubleSpinBox,
+QWidget#comparisonPanel QPushButton, QWidget#comparisonPanel QToolButton {{
+    background: #36393e; color: #ededee; border: 1px solid transparent; border-radius: 4px;
+}}
+QWidget#comparisonPanel QComboBox:hover, QWidget#comparisonPanel QDoubleSpinBox:hover,
+QWidget#comparisonPanel QPushButton:hover, QWidget#comparisonPanel QToolButton:hover {{ background: #464b52; }}
+QWidget#comparisonPanel QComboBox:focus, QWidget#comparisonPanel QDoubleSpinBox:focus,
+QWidget#comparisonPanel QPushButton:focus, QWidget#comparisonPanel QToolButton:focus {{ border-color: #91a6bd; }}
+QWidget#comparisonPanel QSlider {{ background: transparent; }}
+QWidget#comparisonPanel QSlider::groove:horizontal {{ background: #51555b; height: 4px; }}
+QWidget#comparisonPanel QSlider::handle:horizontal {{ background: #91baff; border: none; border-radius: 6px; }}
+QScrollArea#comparisonControls QScrollBar::handle:vertical {{ background: #5b6068; }}
+'''
+STYLE+=WORKSPACE_STYLE
+LIGHT_STYLE+=WORKSPACE_STYLE

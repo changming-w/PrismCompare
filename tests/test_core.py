@@ -40,6 +40,26 @@ class CoreTests(unittest.TestCase):
                 if i!=2:(p/'missing.txt').write_text('a')
             rows,errors=scan_folders(roots,exact=False);d={r.name:r.status for r in rows};self.assertEqual(d['different.txt'],'待校验');self.assertEqual(d['missing.txt'],'缺少文件');self.assertFalse(errors)
             rows,_=scan_folders(roots,exact=True);d={r.name:r.status for r in rows};self.assertEqual(d['different.txt'],'内容不同');self.assertEqual(d['same.txt'],'字节相同')
+    def test_folder_pairing_and_single_source(self):
+        with tempfile.TemporaryDirectory() as t:
+            a,b=[Path(t)/name for name in ('a','b')]
+            for root in (a,b):root.mkdir()
+            for root,name,mtime in [(a,'pred10.png',1),(a,'pred2.png',3),(a,'pred30.png',4),(b,'gt8.png',2),(b,'gt21.png',1)]:
+                path=root/name;path.write_bytes(b'x');os.utime(path,(mtime,mtime))
+            def names(rows):
+                return [[Path(p).name if p else None for p in row.paths] for row in rows]
+            browse,_=scan_folders([a],exact=True,pairing='auto')
+            self.assertEqual(names(browse),[['pred2.png'],['pred10.png'],['pred30.png']])
+            self.assertTrue(all(row.status=='单源浏览' for row in browse))
+            def paired(mode):return scan_folders([a,b],pairing=mode)[0]
+            natural=[['pred2.png','gt8.png'],['pred10.png','gt21.png'],['pred30.png',None]]
+            self.assertEqual(names(paired('auto')),natural)
+            self.assertEqual(names(paired('name_order')),natural)
+            self.assertEqual(names(paired('time_order')),[['pred10.png','gt21.png'],['pred2.png','gt8.png'],['pred30.png',None]])
+            self.assertTrue(all(row.status=='缺少文件' for row in paired('name')))
+            (b/'pred2.png').write_bytes(b'x')
+            self.assertEqual(names(paired('auto')),names(paired('name')))
+            self.assertIn(['pred2.png','pred2.png'],names(paired('auto')))
     def test_aligned_insert_delete_four_way(self):
         original=[['a','b','c'],['insert','a','b','c','tail'],['a','c'],['a','changed','c']]
         columns,diffs=align_texts([{'lines':x} for x in original])

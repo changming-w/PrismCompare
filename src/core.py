@@ -1,6 +1,7 @@
 """Read-only comparison engine. No source-file writes, no image resampling for metrics."""
 from __future__ import annotations
 import difflib, hashlib, os, re, threading
+from itertools import zip_longest
 from dataclasses import dataclass, field
 from collections import OrderedDict
 from pathlib import Path
@@ -51,6 +52,7 @@ class Entry:
     sizes: list[int | None]
     status: str
     errors: list[str] = field(default_factory=list)
+    pairing: str = ''
 
 def digest(path, cancel=None):
     h=hashlib.sha256()
@@ -59,7 +61,10 @@ def digest(path, cancel=None):
             checkpoint(cancel); h.update(b)
     return h.hexdigest()
 
-def scan_folders(roots, recursive=True, exact=False, cancel=None, progress=None):
+def scan_folders(roots, recursive=True, exact=False, cancel=None, progress=None, *, pairing='name'):
+    """Match relative paths, or pair equal positions in independently sorted folders."""
+    if pairing not in ('auto','name','name_order','time_order'):
+        raise ValueError(f'未知的文件夹配对方式：{pairing}')
     inventories=[]; errors=[]
     for slot,root in enumerate(roots):
         if not Path(root).is_dir(): raise ValueError(f'不是可访问的文件夹：{root}')
@@ -75,24 +80,45 @@ def scan_folders(roots, recursive=True, exact=False, cancel=None, progress=None)
                                 if recursive: stack.append(Path(e.path))
                             elif e.is_file():
                                 rel=Path(e.path).relative_to(root).as_posix()
-                                inventory[rel]=(e.path,e.stat().st_size)
+                                stat=e.stat()
+                                inventory[rel]=(e.path,stat.st_size,stat.st_mtime_ns)
                         except OSError as exc: errors.append(f'{e.path}: {exc}')
             except OSError as exc: errors.append(f'{folder}: {exc}')
             if progress: progress(f'扫描 {chr(65+slot)} · 已发现 {len(inventory):,} 个文件')
         inventories.append(inventory)
-    names=sorted(set().union(*(set(i) for i in inventories)),key=natural_key)
+    names=set().union(*inventories)
+    if pairing=='auto':
+        # A shared relative path is evidence of a name-based correspondence.
+        # Keep explicit missing rows in partial matches rather than shifting them.
+        nonempty=[inventory for inventory in inventories if inventory]
+        shared=any(a.keys() & b.keys() for i,a in enumerate(nonempty) for b in nonempty[i+1:])
+        pairing='name' if len(nonempty)<2 or shared else 'name_order'
+    if pairing=='name':
+        ordered=sorted(names,key=lambda name:(natural_key(name),name))
+        groups=((name,[d.get(name) for d in inventories]) for name in ordered)
+        count=len(ordered)
+    else:
+        def order_key(item):
+            name,metadata=item
+            return ((metadata[2],) if pairing=='time_order' else ())+(natural_key(name.rsplit('/',1)[-1]),natural_key(name),name)
+        ordered=[sorted(inventory.items(),key=order_key) for inventory in inventories]
+        count=max(map(len,ordered),default=0)
+        groups=(
+            (' ↔ '.join(dict.fromkeys(entry[0] for entry in group if entry)),
+             [entry[1] if entry else None for entry in group])
+            for group in zip_longest(*ordered)
+        )
     rows=[]
-    for idx,name in enumerate(names):
+    for idx,(name,found) in enumerate(groups):
         checkpoint(cancel)
-        found=[d.get(name) for d in inventories]
         paths=[x[0] if x else None for x in found];sizes=[x[1] if x else None for x in found]
-        status='缺少文件' if None in paths else ('大小不同' if len(set(sizes))>1 else '待校验')
-        row=Entry(name,paths,sizes,status)
-        if exact and None not in paths:
+        status='单源浏览' if len(paths)==1 else '缺少文件' if None in paths else ('大小不同' if len(set(sizes))>1 else '待校验')
+        row=Entry(name,paths,sizes,status,pairing=pairing)
+        if exact and len(paths)>1 and None not in paths:
             try: row.status='字节相同' if len({digest(p,cancel) for p in paths})==1 else '内容不同'
             except OSError as exc: row.status='读取失败';row.errors.append(str(exc))
         rows.append(row)
-        if progress and idx%40==0: progress(f'整理 {idx+1:,} / {len(names):,}'+(' · SHA-256 精确校验' if exact else ''))
+        if progress and idx%40==0: progress(f'整理 {idx+1:,} / {count:,}'+(' · SHA-256 精确校验' if exact and len(paths)>1 else ''))
     return rows,errors
 
 def file_entry(paths):
@@ -215,11 +241,14 @@ def rethreshold_bundle(bundle,threshold,units,cancel=None):
     return output
 
 
-def image_bundle(paths, baseline, threshold, units, standard, storage, alpha, cancel=None, existing=None, metric_mode=None, ready=None, previous_bundle=None, cache=None, cached_only=False, compute_comparisons=True):
+def image_bundle(paths, baseline, threshold, units, standard, storage, alpha, cancel=None, existing=None, metric_mode=None, ready=None, previous_bundle=None, cache=None, cached_only=False, compute_comparisons=True, compute_histograms=True, image_ready=None):
     images=[];errors=[]
     for i,p in enumerate(paths):
         checkpoint(cancel)
-        if p is None: images.append(None);errors.append('此文件夹缺少该文件');continue
+        if p is None:
+            images.append(None);errors.append('此文件夹缺少该文件')
+            if image_ready:image_ready(i,None,errors[-1])
+            continue
         try:
             previous=existing[i] if existing and existing[i] and existing[i]['path']==p else None
             key=cache.key(p,storage,standard) if cache else None
@@ -229,14 +258,18 @@ def image_bundle(paths, baseline, threshold, units, standard, storage, alpha, ca
             raw=previous['raw'] if previous else read_image(p,cancel)
             display=previous['display'] if previous and previous.get('storage')==storage else display_rgb(raw,storage)
             hist=previous['hist'] if previous and previous.get('storage')==storage and previous.get('standard')==standard else None
-            images.append({'raw':raw,'display':display,'hist':hist,'path':p,'storage':storage,'standard':standard,'cache_key':key})
+            cache_key=key if cache else previous.get('cache_key') if previous else None
+            images.append({'raw':raw,'display':display,'hist':hist,'path':p,'storage':storage,'standard':standard,'cache_key':cache_key})
             errors.append('')
         except Cancelled: raise
         except Exception as exc: images.append(None);errors.append(str(exc))
+        if image_ready:
+            checkpoint(cancel)
+            image_ready(i,dict(images[-1]) if images[-1] else None,errors[-1])
     if ready:
         ready({'kind':'image','images':[dict(a) if a else None for a in images],'errors':errors,'comparisons':[None]*len(images),'baseline':baseline,'metric_mode':metric_mode,'pending':True})
     for a in images:
-        if a and a['hist'] is None:a['hist']=histogram(a['raw'],standard,storage,cancel)
+        if a and a['hist'] is None and compute_histograms:a['hist']=histogram(a['raw'],standard,storage,cancel)
         if a and cache:cache.put(a['cache_key'],a)
     if not compute_comparisons:
         return {'kind':'image','images':images,'errors':errors,'comparisons':[None]*len(images),'baseline':baseline,'metric_mode':metric_mode,'threshold':threshold,'dirty_comparisons':True,'parameters':(standard,storage,alpha,metric_mode)}

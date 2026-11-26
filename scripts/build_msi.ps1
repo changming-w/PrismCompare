@@ -12,6 +12,6 @@ if ($LASTEXITCODE -ne 0) { throw 'Manifest generation failed.' }
 New-Item -ItemType Directory -Path releases -Force | Out-Null
 & $candle -nologo -arch x64 -out build/installer/PrismCompare.wixobj build/installer/PrismCompare.wxs
 if ($LASTEXITCODE -ne 0) { throw 'WiX compilation failed.' }
-& $light -nologo -ext WixUIExtension -cultures:zh-CN -out releases/PrismCompare-0.1.13-x64.msi build/installer/PrismCompare.wixobj
+& $light -nologo -ext WixUIExtension -cultures:zh-CN -out releases/PrismCompare-0.1.22-x64.msi build/installer/PrismCompare.wixobj
 if ($LASTEXITCODE -ne 0) { throw 'MSI linking or validation failed.' }
-Write-Host 'Built releases/PrismCompare-0.1.13-x64.msi'
+Write-Host 'Built releases/PrismCompare-0.1.22-x64.msi'

@@ -3,14 +3,16 @@ import csv,json,os,sys,threading,traceback,subprocess,tempfile,hashlib
 from collections import OrderedDict
 from pathlib import Path
 import cv2,numpy as np
-from PySide6.QtCore import Qt,QObject,Signal,QRunnable,QThreadPool,QSortFilterProxyModel,QTimer,QSettings,QUrl
+from PySide6.QtCore import Qt,QObject,Signal,QRunnable,QThreadPool,QSortFilterProxyModel,QTimer,QSettings,QUrl,QEvent
 from PySide6.QtGui import QPixmap,QImage,QShortcut,QKeySequence,QDesktopServices,QTextCursor,QColor,QIcon,QFontDatabase,QFont,QAction,QActionGroup
-from PySide6.QtWidgets import QApplication,QMainWindow,QWidget,QVBoxLayout,QHBoxLayout,QGridLayout,QLabel,QPushButton,QLineEdit,QComboBox,QCheckBox,QDoubleSpinBox,QSlider,QFrame,QSplitter,QTableView,QAbstractItemView,QHeaderView,QFileDialog,QMessageBox,QProgressBar,QStyleFactory,QMenu,QToolButton
+from PySide6.QtWidgets import QApplication,QMainWindow,QWidget,QVBoxLayout,QHBoxLayout,QGridLayout,QLabel,QPushButton,QLineEdit,QComboBox,QCheckBox,QDoubleSpinBox,QSlider,QFrame,QSplitter,QTableView,QAbstractItemView,QHeaderView,QFileDialog,QMessageBox,QStyleFactory,QMenu,QToolButton
 from core import rethreshold_bundle,ImageCache,Entry,Cancelled,checkpoint,scan_folders,file_entry,IMAGE_EXTS,image_bundle,text_bundle,read_image,display_rgb
-from widgets import SettingsToggle,ComparePane,PaneArea,FileModel,ThumbDelegate,STYLE,LIGHT_STYLE,qimage,COLORS
+from widgets import SettingsToggle,ComparePane,PaneArea,FileModel,ThumbDelegate,STYLE,LIGHT_STYLE,qimage,PANE_MIME
 from details import DetailPanel
+from detail_dock import ComparisonSplitter,DetailDock
 
-APP_VERSION='0.1.13'
+APP_VERSION='0.1.22'
+FOLDER_PAIRING={'auto':'自动配对','name':'文件名匹配','name_order':'名称顺序','time_order':'时间顺序'}
 
 def setup_fonts(app):
     # Also makes offscreen render tests use the same fonts as the native Windows UI.
@@ -57,7 +59,10 @@ class Window(QMainWindow):
         self.threshold_timer=QTimer(self);self.threshold_timer.setInterval(40);self.threshold_timer.timeout.connect(self.update_live_threshold)
         self.debounce=QTimer(self);self.debounce.setSingleShot(True);self.debounce.setInterval(240);self.debounce.timeout.connect(self.refresh_content)
         self.selection_timer=QTimer(self);self.selection_timer.setSingleShot(True);self.selection_timer.setInterval(110);self.selection_timer.timeout.connect(self.load_selected)
+        self.hover_timer=QTimer(self);self.hover_timer.setSingleShot(True);self.hover_timer.setInterval(75);self.hover_timer.timeout.connect(self.follow_hover_target)
+        self.hover_target=None
         self.build_ui();self.update_view_controls();self.shortcuts();self.configure_count();self.init_sidebar();self.restore_settings();self.restoring_settings=False;self.show_details.setChecked(self.two_image_details if self.active_count()==2 else False);self.build_menus();self.build_toolbar();self.apply_theme()
+        QApplication.instance().installEventFilter(self)
         QApplication.styleHints().colorSchemeChanged.connect(self.apply_theme)
     def button(self,label,callback,primary=False):
         b=QPushButton(label);b.clicked.connect(callback)
@@ -73,22 +78,29 @@ class Window(QMainWindow):
         self.top=QWidget(self);self.top.hide();bar=QHBoxLayout(self.top);bar.setContentsMargins(0,0,0,0)
         bar.addWidget(self.button('打开文件…',self.open_files));bar.addWidget(self.button('添加文件夹…',self.add_folder))
         self.mode=self.combo(['文件夹','文件']);bar.addWidget(self.mode);bar.addWidget(QLabel('比较数量'))
-        self.count=self.combo(['2','3','4']);self.count.currentIndexChanged.connect(self.configure_count);bar.addWidget(self.count)
+        self.count=self.combo(['1','2','3','4']);self.count.setCurrentText('2');self.count.currentIndexChanged.connect(self.configure_count);bar.addWidget(self.count)
         self.recursive=QCheckBox('包含子目录');self.recursive.setChecked(True);bar.addWidget(self.recursive)
         self.exact=QCheckBox('SHA-256 精确校验');self.exact.setToolTip('读取每个文件内容。关闭时只比较存在性与大小，大小相同显示“待校验”。网络文件夹建议先关闭。');bar.addWidget(self.exact);bar.addStretch()
         self.start=self.button('开始比对',self.compare,True);bar.addWidget(self.start);self.cancel_button=self.button('停止',self.cancel_work);self.set_busy(False);bar.addWidget(self.cancel_button)
         bar.addWidget(self.button('保存会话',self.save_session));bar.addWidget(self.button('打开会话',self.open_session));bar.addWidget(self.theme_combo)
         self.sources=QWidget();grid=QGridLayout(self.sources);grid.setContentsMargins(0,0,0,0);grid.setHorizontalSpacing(16);self.path_edits=[];self.source_cards=[]
         for i in range(4):
-            card=QWidget();line=QHBoxLayout(card);line.setContentsMargins(0,0,0,0);badge=QLabel(chr(65+i));badge.setStyleSheet(f'font-weight:700;color:{COLORS[i]};');line.addWidget(badge)
+            card=QWidget();line=QHBoxLayout(card);line.setContentsMargins(0,0,0,0);badge=QLabel(chr(65+i));badge.setObjectName('sourceBadge');badge.setProperty('slot',chr(65+i));badge.setAlignment(Qt.AlignmentFlag.AlignCenter);badge.setFixedWidth(21);line.addWidget(badge)
             edit=QLineEdit();edit.setPlaceholderText('选择文件夹或文件，也可以粘贴完整路径');edit.returnPressed.connect(self.compare);line.addWidget(edit);self.path_edits.append(edit)
-            line.addWidget(self.button('选择…',lambda _=False,j=i:self.choose_source(j)));grid.addWidget(card,i//2,i%2);self.source_cards.append(card)
+            line.addWidget(self.button('选择…',lambda _=False,j=i:self.choose_source(j)))
+            remove=QToolButton();remove.setObjectName('removeSource');remove.setText('×');remove.setFixedSize(26,26)
+            remove.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+            remove.setToolTip(f'移除来源 {chr(65+i)}（保留磁盘上的文件）')
+            remove.setAccessibleName(f'移除来源 {chr(65+i)}');remove.setEnabled(False)
+            remove.clicked.connect(lambda _=False,j=i:self.remove_source(j))
+            edit.textChanged.connect(lambda path,button=remove:button.setEnabled(bool(path.strip().strip('"'))))
+            line.addWidget(remove);grid.addWidget(card,i//2,i%2);self.source_cards.append(card)
         outer.addWidget(self.sources)
         self.controls=QWidget();controls=QVBoxLayout(self.controls);controls.setContentsMargins(0,0,0,0);controls.setSpacing(6)
         line=QHBoxLayout();line.setSpacing(4);line.addWidget(QLabel('基准'));self.baseline=self.combo(['A','B']);self.baseline.setFixedWidth(140);self.baseline.setToolTip('选择基准图片或基准文件夹；文件夹中的每组图片都会使用此来源作为基准。');self.baseline.currentIndexChanged.connect(self.schedule_refresh);line.addWidget(self.baseline)
         for edit in self.path_edits:edit.textChanged.connect(self.refresh_baseline_labels)
         self.view_mode=self.combo(['原图','红蓝差异','绝对差值','半透明叠加','滑动分割']);self.view_mode.currentIndexChanged.connect(self.select_result_mode);line.addWidget(self.view_mode)
-        self.swap_button=self.button('左右交换',self.swap_sources);self.swap_button.setToolTip('仅交换当前打开的图片：两路交换 A/B，多路交换基准和所选图片。不修改文件夹路径，不重新扫描。');line.addWidget(self.swap_button)
+        self.swap_button=self.button('左右交换',self.swap_sources);self.swap_button.setToolTip('交换图片、上方路径及侧栏来源列。两路交换 A/B，多路交换基准和所选来源。');line.addWidget(self.swap_button)
         self.threshold=QDoubleSpinBox();self.threshold.setRange(0,255);self.threshold.setDecimals(3);self.threshold.setSingleStep(1);self.threshold.setMaximumWidth(90);self.threshold.valueChanged.connect(self.request_live_threshold);self.threshold.hide()
         self.units=self.combo(['8bit 码值','10bit 码值','16bit 码值']);self.units.currentIndexChanged.connect(self.units_changed);line.addWidget(self.units)
         self.storage=self.combo(['自动 8/16bit','10bit 左移6位']);self.storage.setToolTip('自动：8bit÷255，16bit÷65535。左移6位：16bit÷65472，适用于 v16=v10<<6 的 PNG。');self.storage.currentIndexChanged.connect(self.schedule_refresh);line.addWidget(self.storage)
@@ -107,12 +119,18 @@ class Window(QMainWindow):
         self.ignore_space=QCheckBox('文本忽略行首尾空白');self.ignore_space.toggled.connect(self.schedule_refresh);line.addWidget(self.ignore_space)
         line.addWidget(self.button('上一处差异',lambda:self.jump_diff(-1)));line.addWidget(self.button('下一处差异 F7',lambda:self.jump_diff(1)));controls.addLayout(line);outer.addWidget(self.controls)
         for widget,width in [(self.units,90),(self.storage,112),(self.hist_mode,64),(self.standard,84),(self.layout_mode,100)]:widget.setFixedWidth(width)
-        self.progress=QProgressBar();self.progress.setRange(0,0);self.progress.setTextVisible(False);self.progress.hide();outer.addWidget(self.progress)
         self.split=QSplitter(Qt.Orientation.Horizontal);outer.addWidget(self.split,1)
         self.sidebar=QWidget();left=QVBoxLayout(self.sidebar);left.setContentsMargins(0,0,5,0);left.setSpacing(6)
         row=QHBoxLayout();self.search=QLineEdit();self.search.setPlaceholderText('搜索相对路径…');self.search.textChanged.connect(self.filter_changed);row.addWidget(self.search)
         self.list_style=self.combo(['缩略图','文件名']);self.list_style.currentIndexChanged.connect(self.list_style_changed);row.addWidget(self.list_style);self.sidebar_refresh=self.button('刷新',self.refresh_sources);self.sidebar_refresh.setToolTip('重新扫描来源，更新缩略图和当前图片；尽量保留当前项目');row.addWidget(self.sidebar_refresh);left.addLayout(row)
         row=QHBoxLayout();self.only_images=QCheckBox('仅图片');self.only_images.toggled.connect(self.filter_changed);row.addWidget(self.only_images);self.only_diff=QCheckBox('隐藏已确认相同');self.only_diff.toggled.connect(self.filter_changed);row.addWidget(self.only_diff);row.addStretch();left.addLayout(row)
+        pairing_row=QHBoxLayout();pairing_row.addWidget(QLabel('配对'))
+        self.folder_pairing=QComboBox()
+        for key,label in FOLDER_PAIRING.items():self.folder_pairing.addItem(label,key)
+        self.folder_pairing.setToolTip('自动：有相同相对路径时按文件名匹配，否则按名称顺序。名称和时间模式分别排序后逐项对齐；时间使用修改时间，由早到晚。')
+        self.folder_pairing.currentIndexChanged.connect(self.folder_pairing_changed)
+        self.mode.currentIndexChanged.connect(lambda index:self.folder_pairing.setEnabled(index==0))
+        pairing_row.addWidget(self.folder_pairing,1);left.addLayout(pairing_row)
         self.model=FileModel();self.model.thumb_provider=self.thumbnail;self.proxy=FilterModel();self.proxy.setSourceModel(self.model)
         self.table=QTableView();self.table.setModel(self.proxy);self.table.setItemDelegate(ThumbDelegate(self.table));self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows);self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection);self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers);self.table.setAlternatingRowColors(True);self.table.setShowGrid(False);self.table.verticalHeader().hide();self.table.setWordWrap(True);self.table.setSortingEnabled(False)
         self.table.selectionModel().currentRowChanged.connect(lambda *_:self.selection_timer.start());left.addWidget(self.table,1)
@@ -122,21 +140,24 @@ class Window(QMainWindow):
         self.workspace.panes=self.panes
         for p in self.panes:p.setParent(self.workspace)
         for i,p in enumerate(self.panes):
-            p.image.changed.connect(lambda state,j=i:self.sync_views(j,state));p.image.pixel.connect(self.pixel_values)
+            p.image.reorder_enabled=True
+            p.image.changed.connect(lambda state,j=i:self.sync_views(j,state))
+            p.image.pixel.connect(lambda x,y,j=i:self.pixel_values(x,y,j))
             p.image.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu);p.image.customContextMenuRequested.connect(lambda pos,j=i:self.image_context_menu(j,pos))
             p.text.verticalScrollBar().valueChanged.connect(lambda v,j=i:self.sync_text(j,v))
-        self.image_split=QSplitter(Qt.Orientation.Vertical);self.image_split.addWidget(self.workspace);self.details=DetailPanel();self.image_split.addWidget(self.details);self.details.hide();self.image_split.setSizes([440,330]);self.image_split.setChildrenCollapsible(False);self.saved_detail_sizes=None;self.image_split.splitterMoved.connect(self.remember_detail_sizes)
+        self.image_split=ComparisonSplitter(Qt.Orientation.Vertical);self.image_split.setHandleWidth(6);self.image_split.addWidget(self.workspace);self.details=DetailPanel();self.image_split.addWidget(self.details);self.details.hide();self.image_split.setSizes([440,330]);self.image_split.setChildrenCollapsible(False);self.image_split.splitterMoved.connect(self.remember_detail_sizes)
+        self.detail_dock=DetailDock(self,self.image_split,self.details)
         self.details.threshold_changed.connect(self.threshold.setValue);self.threshold.valueChanged.connect(self.detail_threshold);self.units.currentIndexChanged.connect(self.detail_threshold)
         self.details.zoom_changed.connect(self.detail_zoom);self.details.fit_requested.connect(self.fit_all);self.details.actual_requested.connect(self.actual_all);self.details.pixel.connect(self.pixel_values)
         self.details.swap_requested.connect(self.swap_sources)
         self.details.view.wipe_changed.connect(lambda value:self.mix.setValue(round(value*100)))
         self.split.addWidget(self.image_split);self.split.setStretchFactor(0,0);self.split.setStretchFactor(1,1);self.split.setSizes([430,1100])
-        self.statusBar().showMessage('就绪 · 拖入 2–4 个文件或文件夹 · Alt+← / → 切换项目 · Ctrl+B 隐藏列表 · F10 全屏查看')
+        self.statusBar().showMessage('就绪 · 拖入文件或文件夹 · Alt+← / → 切换项目 · Ctrl+B 显隐列表 · F10 全屏查看')
     def init_sidebar(self):
         from sidebar import SidebarController
         self.sidebar_controller=SidebarController(self)
     def preference_widgets(self):
-        return {name:getattr(self,name) for name in ['mode','count','baseline','view_mode','units','storage','hist_mode','standard','gain','layout_mode','list_style','theme_combo','recursive','exact','alpha','sync','log_hist','show_details','ignore_space','only_images','only_diff','threshold','mix']}
+        return {name:getattr(self,name) for name in ['mode','count','baseline','view_mode','units','storage','hist_mode','standard','gain','layout_mode','list_style','folder_pairing','theme_combo','recursive','exact','alpha','sync','log_hist','show_details','ignore_space','only_images','only_diff','threshold','mix']}
     def restore_settings(self):
         self.settings_toggle.setChecked(str(self.settings.value('settings_expanded','true')).lower()=='true')
         for name,widget in self.preference_widgets().items():
@@ -164,7 +185,7 @@ class Window(QMainWindow):
         self.settings.setValue('last_metric_mode',self.last_metric_mode);self.settings.sync()
     def record_history(self):
         paths=[e.text().strip().strip('"') for e in self.path_edits[:self.active_count()]]
-        item={'paths':paths,'mode':self.mode.currentIndex(),'baseline':self.baseline.currentIndex(),'recursive':self.recursive.isChecked(),'exact':self.exact.isChecked()}
+        item={'paths':paths,'mode':self.mode.currentIndex(),'baseline':self.baseline.currentIndex(),'recursive':self.recursive.isChecked(),'exact':self.exact.isChecked(),'pairing':self.folder_pairing.currentData()}
         key=lambda d:(d.get('mode'),[os.path.normcase(os.path.normpath(p)) for p in d.get('paths',[])])
         self.history=[item]+[d for d in self.history if isinstance(d,dict) and key(d)!=key(item)][:29]
         self.settings.setValue('history',json.dumps(self.history,ensure_ascii=False));self.settings.sync()
@@ -180,10 +201,11 @@ class Window(QMainWindow):
         self.history=[];self.settings.setValue('history','[]');self.settings.sync()
     def open_history(self,item):
         paths=item.get('paths',[])
-        if not 2<=len(paths)<=4:return
+        if not 1<=len(paths)<=4:return
         # Existence checks are performed by the background scan, including UNC paths.
         self.count.setCurrentText(str(len(paths)));self.mode.setCurrentIndex(item.get('mode',0))
         for i,edit in enumerate(self.path_edits):edit.setText(paths[i] if i<len(paths) else '')
+        self.restore_folder_pairing(item.get('pairing','name'))
         self.baseline.setCurrentIndex(min(item.get('baseline',0),len(paths)-1));self.recursive.setChecked(item.get('recursive',True));self.exact.setChecked(item.get('exact',False));self.compare()
     def apply_theme(self,*_):
         if not hasattr(self,'model'):return
@@ -193,9 +215,39 @@ class Window(QMainWindow):
         check=asset/'check.png';arrow=asset/('down_light.png' if light else 'down_dark.png')
         if check.exists():style+=f'QCheckBox::indicator:checked {{ image: url("{check.as_posix()}"); }}'
         if arrow.exists():style+=f'QComboBox::drop-down {{ width: 18px; border: none; }} QComboBox::down-arrow {{ image: url("{arrow.as_posix()}"); width: 10px; height: 6px; }}'
-        style+='QToolBar { spacing: 3px; padding: 4px; border-bottom: 1px solid '+('#d9dfe7' if light else '#344050')+'; } QToolBar QToolButton { padding: 2px 6px; min-width: 30px; border-radius: 2px; } QToolBar QToolButton:checked { background: '+('#cfe5fa' if light else '#355579')+'; }'
-        style+='QWidget#floatingSidebar { background: '+('#f5f6f8' if light else '#1d2531')+'; border: 1px solid '+('#d4dae3' if light else '#3d4b5c')+'; } QToolButton#sidebarHandle { background: '+('#e5eff9' if light else '#30465f')+'; border: none; }'
-        style+='QToolButton#settingsToggle { border: none; border-radius: 5px; background: transparent; color: '+('#526172' if light else '#c4cfdd')+'; padding: 5px 12px; min-width: 58px; font-weight: 500; } QToolButton#settingsToggle:hover { background: '+('#e4edf7' if light else '#34475d')+'; color: '+('#175b98' if light else '#e3efff')+'; } QToolButton#settingsToggle:pressed { background: '+('#d2e3f4' if light else '#405b78')+'; }'
+        comparison_arrow=asset/'down_dark.png'
+        if comparison_arrow.exists():style+=f'QWidget#comparisonPanel QComboBox::down-arrow {{ image: url("{comparison_arrow.as_posix()}"); }}'
+        surface,hover,selected,accent,muted=(
+            ('#f9fbfe','#e7eff9','#dceaff','#173959','#667890') if light
+            else ('#162131','#263951','#304b69','#f5f8ff','#8497b1')
+        )
+        style+=f'''
+QToolBar#commandToolbar {{ background: {surface}; spacing: 3px; padding: 4px 6px; border: none; }}
+QToolBar#commandToolbar QToolButton {{ background: transparent; border: 1px solid transparent; border-radius: 6px; padding: 2px 5px; min-width: 32px; }}
+QToolBar#commandToolbar QToolButton:hover:enabled {{ background: {hover}; }}
+QToolBar#commandToolbar QToolButton:checked:enabled, QToolBar#commandToolbar QToolButton:pressed:enabled {{ background: {selected}; color: {accent}; }}
+QToolBar#commandToolbar QToolButton:focus {{ border-color: {muted}; }}
+QToolBar#commandToolbar QToolButton:disabled {{ color: {muted}; }}
+QToolBar#commandToolbar QWidget#toolbarSpacer {{ background: transparent; }}
+QWidget#floatingSidebar {{ background: {surface}; border: none; }}
+QToolButton#sidebarHandle {{ background: transparent; color: {muted}; border: none; }}
+QToolButton#sidebarHandle:hover {{ background: {hover}; color: {accent}; }}
+QToolButton#removeSource {{ background: transparent; color: {muted}; border: 1px solid transparent; border-radius: 5px; font-size: 16px; padding: 0; }}
+QToolButton#removeSource:hover:enabled {{ background: {hover}; color: {accent}; }}
+QToolButton#removeSource:focus {{ border-color: {muted}; }}
+QToolButton#removeSource:disabled {{ color: transparent; }}
+QToolBar#commandToolbar QToolButton#settingsToggle {{ background: transparent; padding: 5px 12px; min-width: 58px; color: {muted}; }}
+QToolBar#commandToolbar QToolButton#settingsToggle:checked,
+QToolBar#commandToolbar QToolButton#settingsToggle:hover,
+QToolBar#commandToolbar QToolButton#settingsToggle:pressed {{ background: transparent; color: {accent}; }}
+QLabel#sourceBadge {{ font-weight: 700; border-radius: 4px; }}
+'''
+        badges=(
+            (('#205d9d','#e1edff'),('#197158','#e1f3ec'),('#8c581b','#faedd5'),('#7247a0','#eee5fa')) if light
+            else (('#a1c9ff','#233c5b'),('#94e5cc','#1b453d'),('#ffd393','#493823'),('#ddbcff','#3c2f56'))
+        )
+        for slot,(foreground,background) in zip('ABCD',badges):
+            style+=f'QLabel#sourceBadge[slot="{slot}"] {{ color: {foreground}; background: {background}; }}'
         QApplication.instance().setStyleSheet(style);self.model.light=light
         if hasattr(self,'command_toolbar'):
             from toolbar import refresh_icons
@@ -208,9 +260,11 @@ class Window(QMainWindow):
     def refresh_command_state(self):
         if not hasattr(self,'toolbar_actions'):return
         image_mode=bool(self.bundle and self.bundle['kind']=='image' and any(self.bundle['images']))
-        for name in ['左右交换当前图片','自动缩放：对齐基准显示大小','适应窗口','原始像素 1:1','全屏查看当前图片组','纯图片专注模式']:
+        for name in ['交换图片和来源位置','自动缩放：对齐基准显示大小','适应窗口','原始像素 1:1','全屏查看当前图片组','纯图片专注模式']:
             self.toolbar_actions[name].setEnabled(image_mode)
-        for action in self.mode_actions.values():action.setEnabled(image_mode)
+        for name in ('交换图片和来源位置','自动缩放：对齐基准显示大小'):
+            self.toolbar_actions[name].setEnabled(image_mode and self.active_count()>1)
+        for action in self.mode_actions.values():action.setEnabled(image_mode and self.active_count()>1)
         for name in ['上一项','下一项','上一处差异','下一处差异']:self.toolbar_actions[name].setEnabled(bool(self.rows))
     def build_menus(self):
         menus=[('文件(&F)',[('打开文件…\tCtrl+O',self.open_files),('添加文件夹…',self.add_folder),('重新比对\tCtrl+R',self.compare),('保存会话…',self.save_session),('打开会话…',self.open_session),('导出比较列表…',self.export_list),('退出',self.close)]),('视图(&V)',[('上一项\tAlt+←',lambda:self.navigate(-1)),('下一项\tAlt+→',lambda:self.navigate(1)),('适应窗口\tF',self.fit_all),('原始像素\t1',self.actual_all),('显示/隐藏文件列表\tCtrl+B',lambda:self.sidebar_controller.toggle()),('全屏查看图片\tF10',self.fullscreen_images),('专注图片\tF11',self.focus_mode)]),('比较(&C)',[('上一处差异\tShift+F7',lambda:self.jump_diff(-1)),('下一处差异\tF7',lambda:self.jump_diff(1)),('停止后台任务\tEsc',self.cancel_work)]),('帮助(&H)',[('使用说明与快捷键',self.help),('打开示例',self.demo)])]
@@ -218,6 +272,11 @@ class Window(QMainWindow):
         for title,items in menus:
             menu=self.menuBar().addMenu(title);menu_map[title]=menu
             for label,fn in items:action=QAction(label,self);action.triggered.connect(fn);menu.addAction(action)
+        file_menu=menu_map['文件(&F)']
+        new_window=QAction('新建比对窗口',self)
+        new_window.setShortcut(QKeySequence('Ctrl+N'))
+        new_window.triggered.connect(self.new_comparison_window)
+        file_menu.insertAction(file_menu.actions()[0],new_window)
         self.option_actions={}
         def combo_menu(parent,title,combo):
             submenu=parent.addMenu(title);group=QActionGroup(self);group.setExclusive(True);actions=[]
@@ -228,6 +287,7 @@ class Window(QMainWindow):
             self.option_actions[title]=actions
         options=menu_map['比较(&C)'].addMenu('来源与扫描设置')
         combo_menu(options,'来源类型',self.mode);combo_menu(options,'比较数量',self.count)
+        combo_menu(options,'文件夹配对',self.folder_pairing)
         for label,checkbox in [('包含子目录',self.recursive),('SHA-256 精确校验',self.exact)]:
             action=options.addAction(label);action.setCheckable(True);action.setChecked(checkbox.isChecked());action.toggled.connect(checkbox.setChecked);checkbox.toggled.connect(action.setChecked);self.option_actions[label]=action
         combo_menu(menu_map['比较(&C)'],'Y′ / SSIM 亮度权重',self.standard)
@@ -238,16 +298,22 @@ class Window(QMainWindow):
             path=self.path_edits[i].text().strip();name=Path(path).name if path else '未选择'
             self.baseline.setItemText(i,f'{chr(65+i)} · {name}');self.baseline.setItemData(i,path,Qt.ItemDataRole.ToolTipRole)
     def configure_count(self,*_):
-        if self.scan_id is not None:self.cancel_work()
+        if self.scan_id is not None or self.rows:self.cancel_work()
+        # Restoring the two-source inspector emits toggled synchronously.
+        # Invalidate the old one-source bundle before that signal can use it.
+        if self.rows:self.clear_results('比较数量已改变，请重新点击“开始比对”')
         n=self.active_count();previous=self.baseline.currentIndex();self.baseline.blockSignals(True);self.baseline.clear();self.baseline.addItems([chr(65+i) for i in range(n)]);self.baseline.setCurrentIndex(min(max(previous,0),n-1));self.baseline.blockSignals(False)
-        for i,w in enumerate(self.source_cards):w.setVisible(i<n)
+        for i,w in enumerate(self.source_cards):
+            w.setVisible(i<n)
+            self.panes[i].image.reorder_enabled=n>1
+        if n>1 and hasattr(self,'sidebar_controller'):self.sidebar_controller.set_browse_docked(False)
         self.show_details.setChecked(self.two_image_details if n==2 else False)
+        self.show_details.setEnabled(n>1)
         self.refresh_baseline_labels()
         self.layout_panes()
         self.split.setSizes([180+n*94,max(650,self.width()-180-n*94)])
-        if self.rows:self.clear_results('比较数量已改变，请重新点击“开始比对”')
     def layout_panes(self,*_):
-        n=self.active_count();grid=self.layout_mode.currentIndex()==2 or (self.layout_mode.currentIndex()==0 and n==4)
+        n=self.active_count();grid=n>1 and (self.layout_mode.currentIndex()==2 or (self.layout_mode.currentIndex()==0 and n==4))
         self.workspace.count=n;self.workspace.grid=grid;self.workspace.arrange()
     def shortcuts(self):
         for key,fn in [('Ctrl+O',self.open_files),('Ctrl+R',self.compare),('Alt+Left',lambda:self.navigate(-1)),('Alt+Right',lambda:self.navigate(1)),('F7',lambda:self.jump_diff(1)),('Shift+F7',lambda:self.jump_diff(-1)),('Ctrl+B',lambda:self.sidebar_controller.toggle()),('F10',self.fullscreen_images),('F11',self.focus_mode),('Escape',self.escape_action)]:
@@ -271,7 +337,8 @@ class Window(QMainWindow):
             m=layout.contentsMargins()
             self.focus_saved={'rect':self.geometry(),'maximized':self.isMaximized(),'geometry':self.saveGeometry(),'margins':(m.left(),m.top(),m.right(),m.bottom()),'spacing':layout.spacing(),'split':self.split.saveState(),'image_split':self.image_split.saveState(),'brushes':[p.image.backgroundBrush() for p in self.panes]}
             self.focus_active=True
-            for widget in [self.menuBar(),self.command_toolbar,self.statusBar(),self.sources,self.controls,self.progress,self.details]:widget.hide()
+            for widget in [self.menuBar(),self.command_toolbar,self.statusBar(),self.sources,self.controls]:widget.hide()
+            self.details_visibility()
             self.sidebar_controller.focus(True);layout.setContentsMargins(0,0,0,0);layout.setSpacing(0)
             self.split.setHandleWidth(0);self.image_split.setHandleWidth(0);self.workspace.gap=0;self.workspace.setStyleSheet('background: #404040;')
             for pane in self.panes:
@@ -286,12 +353,11 @@ class Window(QMainWindow):
             self.showNormal();self.restoreGeometry(saved['geometry'])
             if not saved['maximized']:self.setGeometry(saved['rect'])
             layout.setContentsMargins(*saved['margins']);layout.setSpacing(saved['spacing'])
-            self.split.setHandleWidth(4);self.image_split.setHandleWidth(4);self.workspace.gap=5;self.workspace.setStyleSheet('')
+            self.split.setHandleWidth(4);self.image_split.setHandleWidth(6);self.workspace.gap=self.workspace.DIVIDER_WIDTH;self.workspace.setStyleSheet('')
             for pane,brush in zip(self.panes,saved['brushes']):pane.image.presentation_only=False;pane.image.setBackgroundBrush(brush);pane.image.viewport().update()
             for widget in [self.menuBar(),self.command_toolbar,self.statusBar()]:widget.show()
             self.sidebar_controller.focus(False);self.toggle_settings(self.settings_toggle.isChecked());self.details_visibility()
             self.split.restoreState(saved['split']);self.image_split.restoreState(saved['image_split']);self.workspace.arrange()
-            self.progress.setVisible(self.scan_id is not None or (self.preview_id in self.jobs and self.jobs[self.preview_id][2] not in ('threshold','recompute')))
     def toggle_settings(self,expanded):
         self.settings_toggle.update()
         for widget in [self.sources,self.controls]:widget.setVisible(expanded and not self.focus_active)
@@ -299,10 +365,43 @@ class Window(QMainWindow):
     def choose_source(self,i):
         if self.mode.currentIndex()==0:p=QFileDialog.getExistingDirectory(self,'选择文件夹',self.path_edits[i].text())
         else:p,_=QFileDialog.getOpenFileName(self,'选择文件',self.path_edits[i].text())
-        if p:self.path_edits[i].setText(p)
+        if p:
+            self.path_edits[i].setText(p)
+            if self.mode.currentIndex()==0:self.compare()
+    def remove_source(self,index):
+        paths=[edit.text().strip().strip('"') for edit in self.path_edits[:self.active_count()]]
+        if not 0<=index<len(paths) or not paths[index]:return
+        remaining=[slot for slot,path in enumerate(paths) if slot!=index and path]
+        baseline=self.baseline.currentIndex()
+        restore_path=None
+        if self.current_entry:
+            row_paths=self.current_entry.paths
+            order=([baseline] if baseline in remaining else [])+[slot for slot in remaining if slot!=baseline]
+            restore_path=next((row_paths[slot] for slot in order if slot<len(row_paths) and row_paths[slot]),None)
+        sources=[paths[slot] for slot in remaining]
+        self.count.setCurrentText(str(len(sources) or 2))
+        for slot,edit in enumerate(self.path_edits):edit.setText(sources[slot] if slot<len(sources) else '')
+        if sources:
+            self.baseline.setCurrentIndex(remaining.index(baseline) if baseline in remaining else 0)
+            self.compare(restore_path=restore_path)
+        else:
+            self.cancel_work()
+            self.baseline.setCurrentIndex(0)
+            self.image_cache.clear()
+            message='已移除所有来源'
+            self.clear_results(message)
+            self.statusBar().showMessage(message)
     def open_files(self):
         files,_=QFileDialog.getOpenFileNames(self,'选择 2–4 个文件（图片、文档、代码均可）')
         if files:self.set_paths(files,False)
+    def new_comparison_window(self):
+        window=Window()
+        app=QApplication.instance()
+        if not hasattr(app,'comparison_windows'):app.comparison_windows=set()
+        app.comparison_windows.add(window)
+        if hasattr(self,'shell_register'):self.shell_register(window)
+        window.show()
+        return window
     def add_folder(self):
         p=QFileDialog.getExistingDirectory(self,'添加待比较文件夹')
         if not p:return
@@ -310,29 +409,70 @@ class Window(QMainWindow):
             for edit in self.path_edits:edit.clear()
         self.mode.setCurrentIndex(0)
         empty=next((i for i,e in enumerate(self.path_edits) if not e.text().strip()),None)
-        if empty is None:QMessageBox.information(self,'最多四个','请通过 A–D 旁的“选择”按钮替换某个文件夹。');return
+        if empty is None:QMessageBox.information(self,'最多四个','可用路径旁的“×”移除来源，或用“选择”替换文件夹。');return
         if empty>=self.active_count():self.count.setCurrentText(str(empty+1))
         self.path_edits[empty].setText(p)
-        if all(e.text().strip() for e in self.path_edits[:self.active_count()]):self.compare()
+        self.compare()
     def set_paths(self,paths,folders):
         if len(paths)>4:QMessageBox.warning(self,'数量限制','一次最多比较 4 个文件或文件夹。');return
-        self.mode.setCurrentIndex(0 if folders else 1);self.count.setCurrentText(str(max(2,len(paths))))
+        self.mode.setCurrentIndex(0 if folders else 1);self.count.setCurrentText(str(max(1 if folders else 2,len(paths))))
         for i,e in enumerate(self.path_edits):e.setText(str(paths[i]) if i<len(paths) else '')
-        if len(paths)>=2:self.compare()
-    def dragEnterEvent(self,e):
-        if e.mimeData().hasUrls():e.acceptProposedAction()
-    def dropEvent(self,e):
-        paths=[u.toLocalFile() for u in e.mimeData().urls() if u.isLocalFile()]
-        if not paths:return
+        if len(paths)>=2 or (paths and folders):self.compare()
+    def eventFilter(self,widget,event):
+        kind=event.type()
+        if kind not in (QEvent.Type.DragEnter,QEvent.Type.DragMove,QEvent.Type.Drop):
+            return super().eventFilter(widget,event)
+        if not isinstance(widget,QWidget) or widget.window() is not self or self.closing:
+            return super().eventFilter(widget,event)
+        # Graphics viewports and path edits also accept drops. Route their
+        # file drops here before Qt forwards them to a scene or text editor.
+        mime=event.mimeData()
+        if mime.hasFormat(PANE_MIME):
+            source=next((i for i,pane in enumerate(self.panes) if pane.image is event.source()),None)
+            if source is None:return False
+            action=Qt.DropAction.MoveAction
+            if kind==QEvent.Type.Drop:
+                position=widget.mapToGlobal(event.position().toPoint())
+                target=next((i for i,pane in enumerate(self.panes[:self.active_count()])
+                             if pane.rect().contains(pane.mapFromGlobal(position))),None)
+                if target is not None and target!=source:
+                    self.swap_image_slots(source,target)
+                else:
+                    event.ignore()
+                    return True
+        else:
+            paths=[u.toLocalFile() for u in mime.urls() if u.isLocalFile()]
+            if not paths:return False
+            action=Qt.DropAction.CopyAction
+            if kind==QEvent.Type.Drop:self.add_dropped_paths(paths)
+        event.setDropAction(action)
+        event.accept()
+        return True
+    def add_dropped_paths(self,paths):
+        paths=list(dict.fromkeys(os.path.normpath(path) for path in paths))
         kinds=[Path(p).is_dir() for p in paths]
         if len(set(kinds))!=1:QMessageBox.warning(self,'选择类型','请全部选择文件，或全部选择文件夹。');return
-        self.set_paths(paths,kinds[0])
+        folders=kinds[0]
+        if len(paths)==1 and self.mode.currentIndex()==(0 if folders else 1):
+            current=[edit.text().strip() for edit in self.path_edits[:self.active_count()] if edit.text().strip()]
+            if os.path.normcase(paths[0]) in {os.path.normcase(os.path.normpath(path)) for path in current}:
+                self.statusBar().showMessage('这个来源已加入当前比较。',5000)
+                return
+            if len(current)>=4:
+                self.statusBar().showMessage('当前已有 4 个来源。一次拖入 2–4 个文件可开始新比较。',8000)
+                return
+            paths=current+paths
+        self.set_paths(paths,folders)
+        if len(paths)==1 and not folders:
+            self.cancel_work()
+            message='已加入来源 A，再拖入一个来源即可比较。'
+            self.clear_results(message)
+            self.statusBar().showMessage(message)
     def submit(self,fn,kind,staged=False):
         self.serial+=1;ident=self.serial;event=threading.Event();job=Task(ident,fn,event);self.jobs[ident]=(job,event,kind)
         if staged:job.fn=lambda cancel,progress:fn(cancel,lambda result:job.signals.partial.emit(ident,result))
         job.signals.partial.connect(self.preview_ready)
         job.signals.done.connect(self.finished);job.signals.failed.connect(self.failed);job.signals.progress.connect(self.job_progress)
-        if kind not in ('threshold','recompute') and not self.focus_active:self.progress.show()
         self.set_busy(True);self.pool.start(job);return ident
     def set_busy(self,busy):
         busy=busy or (not self.thumbs_paused and bool(self.thumb_pending or self.thumb_position<len(self.thumb_paths)))
@@ -341,38 +481,59 @@ class Window(QMainWindow):
         if not busy and hasattr(self,'table'):self.table.viewport().update()
     def preview_ready(self,ident,result):
         if ident!=self.preview_id or self.closing:return
-        self.thumb_sources={item['path']:item['display'] for item in result['images'] if item}
-        for i,item in enumerate(result['images']):
-            if item:self.panes[i].set_image(item,self.hist_mode.currentText(),self.log_hist.isChecked())
-            else:self.panes[i].message(result['errors'][i])
-        self.details.metrics.setText('正在计算原分辨率比较指标…')
-        self.statusBar().showMessage('图片已显示 · 正在后台计算直方图和原分辨率指标')
+        index,item,error=result
+        if item:
+            self.thumb_sources[item['path']]=item['display']
+            self.panes[index].set_image(item,self.hist_mode.currentText(),self.log_hist.isChecked())
+        else:self.panes[index].message(error)
     def cancel_id(self,ident):
         if ident in self.jobs:self.jobs[ident][1].set()
     def cancel_work(self):
         self.debounce.stop();self.selection_timer.stop();self.threshold_timer.stop();self.thumb_timer.stop();self.thumbs_paused=True
         for job,_,_ in self.thumb_jobs.values():job.cancel.set()
         for _,event,_ in self.jobs.values():event.set()
-        self.scan_id=self.preview_id=None;self.progress.hide();self.set_busy(False);self.statusBar().showMessage('已请求停止；正在进行的单次文件读取会在返回后停止。')
-    def clear_results(self,message='就绪'):
+        self.scan_id=self.preview_id=None;self.set_busy(False);self.statusBar().showMessage('已请求停止；正在进行的单次文件读取会在返回后停止。')
+    def clear_results(self,message='就绪',*,keep_details=False):
         self.cancel_id(self.preview_id);self.preview_id=None;self.bundle=None;self.current_entry=None;self.rows=[];self.model.reset([],self.active_count())
         for p in self.panes:p.message(message)
-        self.details.hide();self.details.bundle=None
+        if not keep_details:self.detail_dock.set_visible(False)
+        self.details.clear_result()
         self.counter.setText(message);self.refresh_command_state()
     def refresh_sources(self):
         name=self.current_entry.name if self.current_entry else None
         self.compare(restore_name=name)
-    def compare(self,*_,restore_name=None):
-        self.restore_row_name=restore_name;self.image_cache.clear()
+    def restore_folder_pairing(self,key):
+        index=self.folder_pairing.findData(key)
+        self.folder_pairing.blockSignals(True)
+        self.folder_pairing.setCurrentIndex(max(index,0))
+        self.folder_pairing.blockSignals(False)
+        actions=getattr(self,'option_actions',{}).get('文件夹配对')
+        if actions:actions[self.folder_pairing.currentIndex()].setChecked(True)
+    def folder_pairing_changed(self,*_):
+        if self.mode.currentIndex()!=0 or not (self.rows or self.scan_id is not None):return
+        slot=self.baseline.currentIndex()
+        path=self.current_entry.paths[slot] if self.current_entry else None
+        if not path and self.current_entry:path=next((p for p in self.current_entry.paths if p),None)
+        self.compare(restore_path=path)
+    def compare(self,*_,restore_name=None,restore_path=None):
         paths=[e.text().strip().strip('"') for e in self.path_edits[:self.active_count()]]
+        folders=self.mode.currentIndex()==0
+        if folders and any(paths) and not all(paths):
+            baseline_path=paths[self.baseline.currentIndex()]
+            paths=[path for path in paths if path]
+            self.count.setCurrentText(str(len(paths)))
+            for i,edit in enumerate(self.path_edits):edit.setText(paths[i] if i<len(paths) else '')
+            self.baseline.setCurrentIndex(paths.index(baseline_path) if baseline_path else 0)
         if not all(paths):QMessageBox.information(self,'选择来源','请先填写当前所有 A–D 来源；或减少比较数量。');return
-        if self.active_count()>2:self.show_details.setChecked(False)
-        self.cancel_work();self.clear_results('正在载入…');self.generation+=1;self.thumb_cache.clear();self.thumb_pending.clear();self.thumb_fail.clear()
+        self.restore_row_name=restore_name;self.restore_row_path=restore_path;self.image_cache.clear()
+        keep_details=self.details.isVisible()
+        self.cancel_work();self.clear_results('正在载入…',keep_details=keep_details);self.generation+=1;self.thumb_cache.clear();self.thumb_pending.clear();self.thumb_fail.clear()
         for job,_,_ in self.thumb_jobs.values():job.cancel.set()
         self.thumb_pool.clear();self.thumb_jobs.clear()
         self.thumb_sources.clear();self.thumb_completed.clear();self.thumb_paths=[];self.thumb_position=0;self.thumbs_paused=False
-        recursive=self.recursive.isChecked();exact=self.exact.isChecked();folders=self.mode.currentIndex()==0
-        self.scan_id=self.submit(lambda cancel,progress:scan_folders(paths,recursive,exact,cancel,progress) if folders else ([file_entry(paths)],[]),'scan')
+        recursive=self.recursive.isChecked();exact=self.exact.isChecked()
+        pairing=self.folder_pairing.currentData()
+        self.scan_id=self.submit(lambda cancel,progress:scan_folders(paths,recursive,exact,cancel,progress,pairing=pairing) if folders else ([file_entry(paths)],[]),'scan')
         self.statusBar().showMessage('正在扫描文件夹…' if folders else '正在打开文件…')
     def job_progress(self,ident,message):
         if ident in (self.scan_id,self.preview_id):self.statusBar().showMessage(message)
@@ -383,25 +544,36 @@ class Window(QMainWindow):
             self.scan_id=None;self.record_history();self.rows,self.scan_errors=result;self.model.reset(self.rows,self.active_count());self.list_style_changed();self.update_counter()
             self.thumb_paths=list(dict.fromkeys(p for row in self.rows for p in row.paths if p and Path(p).suffix.lower() in IMAGE_EXTS));self.thumb_position=0;self.thumb_timer.start()
             if self.rows:
-                name=getattr(self,'restore_row_name',None)
-                row=next((i for i in range(self.proxy.rowCount()) if self.proxy.index(i,0).data(Qt.ItemDataRole.UserRole).name==name),0) if name else 0
-                self.table.selectRow(row);self.restore_row_name=None
+                name=self.restore_row_name;path=self.restore_row_path;row=0
+                if name or path:
+                    for i in range(self.proxy.rowCount()):
+                        entry=self.proxy.index(i,0).data(Qt.ItemDataRole.UserRole)
+                        if entry.name==name or (path and path in entry.paths):
+                            row=i
+                            break
+                self.table.selectRow(row)
             else:
                 for p in self.panes:p.message('没有可比较的文件')
+                self.detail_dock.set_visible(False)
+            single_folder=self.mode.currentIndex()==0 and self.active_count()==1
+            self.sidebar_controller.set_browse_docked(single_folder)
             if self.scan_errors:self.statusBar().showMessage(f'扫描完成，但 {len(self.scan_errors)} 个路径无法读取；导出列表附带错误信息。')
-            else:self.statusBar().showMessage(f'扫描完成 · {len(self.rows):,} 项 · 按相对路径配对')
+            else:
+                pairing=FOLDER_PAIRING.get(self.rows[0].pairing,'') if self.rows else ''
+                suffix=(' · '+pairing) if pairing and self.active_count()>1 else ''
+                self.statusBar().showMessage(f'扫描完成 · {len(self.rows):,} 项'+suffix)
         elif ident==self.preview_id:
             self.preview_id=None;self.bundle=result
             if kind=='threshold':self.details.update_threshold_result(result)
             else:self.show_bundle()
-            if result['kind']=='image' and result.get('threshold')!=self.threshold.value():self.threshold_timer.start()
-        self.progress.setVisible(not self.focus_active and (self.scan_id is not None or (self.preview_id in self.jobs and self.jobs[self.preview_id][2] not in ('threshold','recompute')))); self.set_busy(self.scan_id is not None or self.preview_id is not None)
+            if result['kind']=='image' and self.details.isVisible() and result.get('threshold')!=self.threshold.value():self.threshold_timer.start()
+        self.set_busy(self.scan_id is not None or self.preview_id is not None)
     def failed(self,ident,error):
         self.jobs.pop(ident,None)
         if ident not in (self.scan_id,self.preview_id):return
         if ident==self.scan_id:self.scan_id=None
         if ident==self.preview_id:self.preview_id=None
-        self.progress.hide();self.set_busy(False)
+        self.set_busy(False)
         if error!='__cancelled__':
             self.statusBar().showMessage('操作失败，请检查路径或文件格式');QMessageBox.warning(self,'无法完成比对',error[-2500:])
     def filter_changed(self,*_):
@@ -421,13 +593,16 @@ class Window(QMainWindow):
         if not index.isValid():return
         entry=index.data(Qt.ItemDataRole.UserRole)
         if entry is self.current_entry and self.bundle:return
-        self.debounce.stop();self.threshold_timer.stop();self.thumb_sources.clear();self.details.hide();self.details.bundle=None
+        self.debounce.stop();self.threshold_timer.stop();self.hover_timer.stop();self.thumb_sources.clear()
+        self.details.clear_result()
+        if not all(Path(path).suffix.lower() in IMAGE_EXTS for path in entry.paths if path):self.detail_dock.set_visible(False)
         self.current_entry=entry;self.display_paths=list(entry.paths);self.bundle=None;self.diff_position=-1
         for i,p in enumerate(self.panes[:self.active_count()]):p.set_title(entry.paths[i],i==self.baseline.currentIndex());p.message('正在载入…' if entry.paths[i] else '此文件夹缺少该文件')
         self.refresh_content();self.update_counter()
     def request_live_threshold(self,*_):
-        if self.current_entry and not self.threshold_timer.isActive():self.threshold_timer.start()
+        if self.current_entry and self.details.isVisible() and not self.threshold_timer.isActive():self.threshold_timer.start()
     def update_live_threshold(self):
+        if not self.details.isVisible():self.threshold_timer.stop();return
         if self.preview_id is not None or self.debounce.isActive():return
         if not self.bundle or self.bundle['kind']!='image':self.threshold_timer.stop();return
         value=self.threshold.value();units=[255,1023,65535][self.units.currentIndex()]
@@ -447,18 +622,25 @@ class Window(QMainWindow):
         self.threshold.setMaximum([255,1023,65535][self.units.currentIndex()]);self.schedule_refresh()
     def refresh_content(self,*,memory_only=False):
         if not self.current_entry:return
-        self.cancel_id(self.preview_id);paths=list(getattr(self,'display_paths',self.current_entry.paths));base=self.baseline.currentIndex();present=[p for p in paths if p]
+        paths=list(self.display_paths)
+        base=self.baseline.currentIndex()
+        if len(paths)!=self.active_count() or not 0<=base<len(paths):return
+        self.cancel_id(self.preview_id)
+        present=[p for p in paths if p]
         if not present:return
         for i,p in enumerate(self.panes[:self.active_count()]):p.set_title(paths[i],i==base)
         if all(Path(p).suffix.lower() in IMAGE_EXTS for p in present):
             old=self.bundle['images'] if self.bundle and self.bundle['kind']=='image' else None
             args=(paths,base,self.threshold.value(),[255,1023,65535][self.units.currentIndex()],self.standard.currentText(),'left10' if self.storage.currentIndex()==1 else 'auto',self.alpha.isChecked())
-            previous=self.bundle if old else None;compute_comparisons=memory_only or self.show_details.isChecked()
+            previous=self.bundle if old else None
+            histograms=self.hist_mode.currentText()!='关闭'
             metric_mode=self.hist_mode.currentText() if self.hist_mode.currentText()!='关闭' else self.last_metric_mode
-            self.preview_id=self.submit(lambda cancel,ready:image_bundle(*args,cancel=cancel,existing=old,metric_mode=metric_mode,ready=None if memory_only else ready,previous_bundle=previous,cache=None if memory_only else self.image_cache,cached_only=memory_only,compute_comparisons=compute_comparisons),'recompute' if memory_only else 'preview',staged=not memory_only)
+            self.preview_id=self.submit(lambda cancel,ready:image_bundle(*args,cancel=cancel,existing=old,metric_mode=metric_mode,
+                image_ready=None if memory_only else lambda index,item,error:ready((index,item,error)),
+                previous_bundle=previous,cache=None if memory_only else self.image_cache,cached_only=memory_only,
+                compute_comparisons=memory_only,compute_histograms=histograms),'recompute' if memory_only else 'preview',staged=not memory_only)
         else:
             ignore=self.ignore_space.isChecked();self.preview_id=self.submit(lambda cancel,_:text_bundle(paths,base,ignore,cancel),'preview')
-        self.statusBar().showMessage('正在更新指标 · 使用已缓存的图片' if memory_only else '正在比较 · 可继续操作，或按 Esc 停止')
     def show_bundle(self):
         b=self.bundle;n=self.active_count()
         if self.focus_active and b['kind']!='image':self.focus_mode()
@@ -469,14 +651,14 @@ class Window(QMainWindow):
                 else:p.message(b['errors'][i])
             self.render_images();self.hist_changed()
             complete=all(b['images']);results=[r for r in b['comparisons'] if r]
-            if complete and len(results)==n-1 and all(r.get('equal',False) for r in results):self.update_status('像素相同')
+            if n>1 and complete and len(results)==n-1 and all(r.get('equal',False) for r in results):self.update_status('像素相同')
             elif complete and any(not r.get('compatible',False) or not r.get('equal',False) for r in results):self.update_status('像素不同')
-            self.statusBar().showMessage('图片 · 滚轮缩放，拖动平移 · 红=超过阈值，蓝=阈值内差异 · 指针显示原始码值')
+            self.statusBar().showMessage('图片 · 适应模式拖动换位 · 放大后拖动平移，Alt+拖动换位 · 悬停跟随比较')
         else:
             for i,p in enumerate(self.panes[:n]):
                 if b['texts'][i]:p.set_text(b['columns'][i],b['texts'][i]['note'])
                 else:p.message(b['errors'][i])
-            if all(b['texts']) and not any(t['truncated'] for t in b['texts']):self.update_status('内容不同' if b['diff_rows'] else '内容相同')
+            if n>1 and all(b['texts']) and not any(t['truncated'] for t in b['texts']):self.update_status('内容不同' if b['diff_rows'] else '内容相同')
             self.statusBar().showMessage(f'文本内容 · {len(b["diff_rows"]):,} 行存在差异 · F7 / Shift+F7 定位 · 文档仅比较提取内容')
         self.update_view_controls();self.details_visibility();self.update_counter();self.refresh_command_state()
     def update_status(self,value):
@@ -511,19 +693,27 @@ class Window(QMainWindow):
         self.details.mode=mode;self.details.mix=mix;self.details.gain=gain;self.details.set_bundle(b);self.detail_threshold()
     def render_mix(self,*_):
         self.update_view_controls()
-        if self.details.bundle and self.view_mode.currentIndex() in (3,4):
+        if self.details.isVisible() and self.details.bundle and self.view_mode.currentIndex() in (3,4):
             self.details.mix=self.mix.value()/100;self.details.render()
     def remember_detail_sizes(self,*_):
-        if not self.focus_active and self.details.isVisible():self.saved_detail_sizes=self.image_split.sizes()
+        if not self.focus_active:self.detail_dock.remember_sizes()
     def details_visibility(self,*_):
-        if not hasattr(self,'details'):return
+        if not hasattr(self,'detail_dock'):return
         if self.active_count()==2 and not self.restoring_settings:self.two_image_details=self.show_details.isChecked()
-        visible=bool(not self.focus_active and self.bundle and self.bundle['kind']=='image' and self.show_details.isChecked())
-        was_visible=self.details.isVisible();self.details.setVisible(visible)
+        visible=bool(self.active_count()>1 and not self.focus_active and self.bundle and self.bundle['kind']=='image' and self.show_details.isChecked())
+        was_visible=self.details.isVisible();self.detail_dock.set_visible(visible)
+        if not visible:
+            self.threshold_timer.stop()
+            task=self.jobs.get(self.preview_id)
+            if task and task[2] in ('recompute','threshold'):
+                self.cancel_id(self.preview_id);self.preview_id=None;self.set_busy(False)
+            return
         if visible and not was_visible:
-            height=self.image_split.height();bottom=min(380,max(260,round(height*.45)))
-            self.image_split.setSizes(self.saved_detail_sizes or [max(200,height-bottom),bottom])
-        if visible and self.bundle.get('dirty_comparisons') and self.preview_id is None:self.refresh_content(memory_only=True)
+            self.detail_dock.restore_sizes()
+            self.details.render()
+        if self.preview_id is None:
+            if self.bundle.get('dirty_comparisons'):self.refresh_content(memory_only=True)
+            elif self.bundle.get('threshold')!=self.threshold.value():self.threshold_timer.start()
     def detail_threshold(self,*_):
         self.details.set_threshold(self.threshold.value(),[255,1023,65535][self.units.currentIndex()])
     def detail_zoom(self,percent):
@@ -533,28 +723,55 @@ class Window(QMainWindow):
     def swap_sources(self):
         if not self.bundle or self.bundle['kind']!='image':return
         n=self.active_count();left=0 if n==2 else self.baseline.currentIndex()
+        if n<2:return
         right=1 if n==2 else self.details.target.currentData()
         if right is None or right==left or right>=n:right=next(i for i in range(n) if i!=left)
+        self.swap_image_slots(left,right)
+    def swap_image_slots(self,left,right):
+        if not self.bundle or self.bundle['kind']!='image':return
+        n=len(self.bundle['images'])
+        if left==right or not (0<=left<n and 0<=right<n):return
+        self.hover_timer.stop()
+        base=self.bundle['baseline']
         pending=self.preview_id is not None or self.debounce.isActive();self.debounce.stop();self.threshold_timer.stop()
         self.cancel_id(self.preview_id);self.preview_id=None
         self.bundle=dict(self.bundle)
         for key in ['images','errors','comparisons']:self.bundle[key]=list(self.bundle[key])
         pixmaps={left:self.panes[left].image.item.pixmap(),right:self.panes[right].image.item.pixmap()}
         self.display_paths[left],self.display_paths[right]=self.display_paths[right],self.display_paths[left]
+        self.swap_source_columns(left,right)
         for key in ['images','errors']:
             items=self.bundle[key];items[left],items[right]=items[right],items[left]
         for dest,source in [(left,right),(right,left)]:
             item=self.bundle['images'][dest]
             if item:self.panes[dest].image.set_image(item['display'],preserve=True,pixmap=pixmaps[source])
-        if n>2 or pending:
-            valid_pair=self.bundle['comparisons'][right] if n>2 and not pending else None
-            self.bundle['comparisons']=[None]*n
-            if n>2:self.bundle['comparisons'][right]=valid_pair
+        comparisons=self.bundle['comparisons']
+        if pending or (n>2 and base in (left,right)):
+            counterpart=right if base==left else left
+            valid_pair=comparisons[counterpart] if not pending else None
+            comparisons[:]=[None]*n
+            if base in (left,right):comparisons[counterpart]=valid_pair
             self.bundle['dirty_comparisons']=True
-        self.progress.hide();self.show_bundle()
+        elif base not in (left,right):
+            comparisons[left],comparisons[right]=comparisons[right],comparisons[left]
+        self.show_bundle()
         if self.bundle.get('dirty_comparisons') and not self.show_details.isChecked():
-            self.statusBar().showMessage('已交换当前图片 · 打开底部对比区时计算新的基准关系')
+            self.statusBar().showMessage('已交换图片和来源位置 · 打开底部对比区时更新指标')
         self.set_busy(self.preview_id is not None)
+    def swap_source_columns(self,left,right):
+        # Update the existing rows in place so the sidebar selection survives.
+        left_edit,right_edit=self.path_edits[left],self.path_edits[right]
+        left_path,right_path=left_edit.text(),right_edit.text()
+        left_edit.setText(right_path);right_edit.setText(left_path)
+        for row in self.rows:
+            row.paths[left],row.paths[right]=row.paths[right],row.paths[left]
+            row.sizes[left],row.sizes[right]=row.sizes[right],row.sizes[left]
+        if self.rows:
+            self.model.dataChanged.emit(
+                self.model.index(0,min(left,right)+1),
+                self.model.index(len(self.rows)-1,max(left,right)+1),
+            )
+        self.record_history()
     def image_context_menu(self,index,pos=None):
         view=self.panes[index].image;menu=QMenu(self)
         commands=[('全屏查看',lambda:self.fullscreen_images(index)),('设为基准',lambda:self.baseline.setCurrentIndex(index)),('自动缩放（对齐基准）',self.align_to_baseline),('适应窗口',lambda:view.fit()),('原始大小（1:1）',lambda:view.actual()),('水平缩放（适应宽度）',view.fit_width),None,
@@ -564,6 +781,10 @@ class Window(QMainWindow):
         for command in commands:
             if command is None:menu.addSeparator();continue
             name,fn=command;action=menu.addAction(name);action.triggered.connect(fn);action.setEnabled(valid)
+        menu.addSeparator()
+        label='移除此文件夹来源' if self.mode.currentIndex()==0 else '移除此图片来源'
+        remove=menu.addAction(label,lambda:self.remove_source(index))
+        remove.setEnabled(index<self.active_count() and bool(self.path_edits[index].text().strip().strip('"')))
         if pos is not None:menu.exec(view.mapToGlobal(pos));menu.deleteLater()
         return menu
     def align_to_baseline(self):
@@ -581,7 +802,9 @@ class Window(QMainWindow):
     def hist_changed(self,*_):
         mode=self.hist_mode.currentText()
         if mode!='关闭':self.last_metric_mode=mode
-        if self.bundle and self.bundle['kind']=='image' and self.bundle.get('metric_mode')!=self.last_metric_mode:self.schedule_refresh()
+        if self.bundle and self.bundle['kind']=='image':
+            missing=mode!='关闭' and any(item and item['hist'] is None for item in self.bundle['images'])
+            if self.bundle.get('metric_mode')!=self.last_metric_mode or missing:self.schedule_refresh()
         self.standard.setVisible(self.hist_mode.currentText() in ('Y','YUV') and not (self.bundle and self.bundle['kind']=='text'));self.standard_label.setVisible(self.hist_mode.currentText() in ('Y','YUV') and not (self.bundle and self.bundle['kind']=='text'))
         for p in self.panes:
             if p.raw is not None:p.hist.configure(mode=self.hist_mode.currentText(),log=self.log_hist.isChecked());p.hist.setVisible(self.hist_mode.currentText()!='关闭')
@@ -598,12 +821,23 @@ class Window(QMainWindow):
         for i,p in enumerate(self.panes[:self.active_count()]):
             if i!=index:p.text.verticalScrollBar().setValue(value)
         self.text_syncing=False
-    def pixel_values(self,x,y):
+    def pixel_values(self,x,y,index=None):
+        if index is not None:
+            target=index if x>=0 and y>=0 else None
+            if target!=self.hover_target:
+                self.hover_target=target
+                self.hover_timer.stop()
+                if target is not None and self.details.isVisible() and target!=self.details.target.currentData():
+                    self.hover_timer.start()
         signature=(x,y,tuple(id(p.raw) for p in self.panes[:self.active_count()]))
         if getattr(self,'last_pixel_signature',None)==signature:return
         self.last_pixel_signature=signature
         for p in self.panes[:self.active_count()]:p.show_pixel(x,y);p.image.set_cursor_pixel(x,y)
         self.details.set_pixel(x,y)
+    def follow_hover_target(self):
+        if not self.details.isVisible() or not self.bundle or self.bundle['kind']!='image':return
+        index=self.details.target.findData(self.hover_target)
+        if index>=0:self.details.target.setCurrentIndex(index)
     def fit_all(self):
         for p in self.panes[:self.active_count()]:p.image.fit()
         self.details.view.fit(emit=False);self.details.update_zoom(self.details.view.transform().m11()*100)
@@ -633,6 +867,8 @@ class Window(QMainWindow):
         return str(Path(self.thumb_directory.name)/(key+'.png'))
     def pump_thumbnails(self):
         if self.closing or self.thumbs_paused:return
+        job=self.jobs.get(self.preview_id)
+        if self.selection_timer.isActive() or (job and job[2]=='preview' and not self.thumb_sources):return
         while len(self.thumb_pending)<2 and self.thumb_position<len(self.thumb_paths):
             path=self.thumb_paths[self.thumb_position];self.thumb_position+=1
             if path not in self.thumb_completed and path not in self.thumb_pending and path not in self.thumb_fail:self.thumbnail(path)
@@ -643,6 +879,8 @@ class Window(QMainWindow):
     def thumbnail(self,path):
         if path in self.thumb_cache:self.thumb_cache.move_to_end(path);return self.thumb_cache[path]
         if self.closing or self.thumbs_paused or self.scan_id is not None:return None
+        job=self.jobs.get(self.preview_id)
+        if self.selection_timer.isActive() or (job and job[2]=='preview' and not self.thumb_sources):return None
         if path in self.thumb_pending or path in self.thumb_fail or len(self.thumb_pending)>=2:return None
         self.thumb_pending.add(path);self.set_busy(True);self.serial+=1;ident=self.serial;generation=self.generation
         cached=path in self.thumb_completed;cache_file=self.thumb_file(path);source=self.thumb_sources.get(path)
@@ -689,7 +927,7 @@ class Window(QMainWindow):
     def save_session(self):
         path,_=QFileDialog.getSaveFileName(self,'保存比较会话','comparison.prism.json','Prism 会话 (*.json)')
         if not path:return
-        data={'version':1,'mode':self.mode.currentIndex(),'paths':[e.text() for e in self.path_edits[:self.active_count()]],'baseline':self.baseline.currentIndex(),'threshold':self.threshold.value(),'units':self.units.currentIndex(),'storage':self.storage.currentIndex(),'standard':self.standard.currentText(),'hist':self.hist_mode.currentText(),'recursive':self.recursive.isChecked(),'exact':self.exact.isChecked()}
+        data={'version':1,'mode':self.mode.currentIndex(),'paths':[e.text() for e in self.path_edits[:self.active_count()]],'baseline':self.baseline.currentIndex(),'threshold':self.threshold.value(),'units':self.units.currentIndex(),'storage':self.storage.currentIndex(),'standard':self.standard.currentText(),'hist':self.hist_mode.currentText(),'recursive':self.recursive.isChecked(),'exact':self.exact.isChecked(),'pairing':self.folder_pairing.currentData()}
         try:Path(path).write_text(json.dumps(data,ensure_ascii=False,indent=2),encoding='utf-8');self.statusBar().showMessage('会话已保存')
         except OSError as exc:QMessageBox.warning(self,'保存失败',str(exc))
     def open_session(self):
@@ -697,8 +935,9 @@ class Window(QMainWindow):
         if not path:return
         try:
             d=json.loads(Path(path).read_text(encoding='utf-8'));paths=d['paths']
-            if not 2<=len(paths)<=4 or not all(isinstance(p,str) for p in paths):raise ValueError('会话必须包含 2–4 个路径')
-            self.count.setCurrentText(str(len(paths)));self.mode.setCurrentIndex(d.get('mode',0))
+            mode=d.get('mode',0)
+            if not 1<=len(paths)<=4 or not all(isinstance(p,str) for p in paths):raise ValueError('会话必须包含 1–4 个文件夹或文件路径')
+            self.count.setCurrentText(str(len(paths)));self.mode.setCurrentIndex(mode);self.restore_folder_pairing(d.get('pairing','name'))
             for i,e in enumerate(self.path_edits):e.setText(paths[i] if i<len(paths) else '')
             self.units.setCurrentIndex(d.get('units',0));self.storage.setCurrentIndex(d.get('storage',0));self.threshold.setValue(d.get('threshold',0));self.baseline.setCurrentIndex(d.get('baseline',0));self.standard.setCurrentText(d.get('standard','BT.709'));self.hist_mode.setCurrentText(d.get('hist','RGB'));self.recursive.setChecked(d.get('recursive',True));self.exact.setChecked(d.get('exact',False));self.compare()
         except Exception as exc:QMessageBox.warning(self,'会话读取失败',str(exc))
@@ -707,13 +946,14 @@ class Window(QMainWindow):
         target=Path(os.environ.get('LOCALAPPDATA',str(Path.home())))/'PrismCompare'/'demo';create_demo(target);self.count.setCurrentText('4');self.set_paths([str(target/chr(65+i)) for i in range(4)],True)
     def help(self):
         QMessageBox.information(self,'Prism Compare · 使用说明',
-            '2–4 个文件或文件夹：按相对路径配对。拖入即可打开。\n\n'
+            '拖入 1 个文件夹即可浏览，或添加最多 4 个来源进行比较。侧边栏可切换文件名匹配、名称顺序、修改时间顺序。\n\n'
             '图片：滚轮缩放，拖动平移；F 适应窗口，1 原始像素。\nAlt+← / → 上一项 / 下一项；F7 / Shift+F7 下一处 / 上一处差异。\nCtrl+B 显隐列表，F10 全屏查看，Esc 停止后台任务。\n\n'
             '红蓝差异：最大通道绝对差超过阈值为红，非零但阈值内为蓝，相同为黑。\n阈值单位可选 8bit / 10bit / 16bit，指标来自原尺寸图片。\n16bit PNG 若存储 v10<<6，请选“10bit 左移6位”。\nY′ 为加权码值，不是屏幕亮度 nit；直方图使用全图像素。\n\n'
             '文本/代码：对齐行并高亮；DOCX/PDF/XLSX 仅比较提取的文字/值/公式。\n不比较文档排版，不执行 OCR、宏或脚本。旧 DOC/XLS 请先转换格式。\nGIF 仅第一帧。图片不做色彩管理或 HDR 显示映射。\n\n'
             '默认文件夹扫描不读取内容，大小相同仅标记“待校验”。\n勾选 SHA-256 可完整读取精确比较。所有来源只读。\n大文本超过 80 万字符/12000 行、PDF 超过 200 页时会明确标注截断。')
     def closeEvent(self,event):
         self.closing=True
+        self.detail_dock.set_visible(False)
         if hasattr(self,'shell_shutdown'):self.shell_shutdown()
         self.cancel_work();self.generation+=1
         for job,_,_ in self.thumb_jobs.values():job.cancel.set()
@@ -721,6 +961,8 @@ class Window(QMainWindow):
         if self.pool.activeThreadCount() or self.thumb_pool.activeThreadCount():
             event.ignore();self.hide();QTimer.singleShot(200,self.close);return
         self.save_preferences()
+        windows=getattr(QApplication.instance(),'comparison_windows',None)
+        if windows is not None:windows.discard(self)
         event.accept()
 
 def main():
@@ -735,16 +977,23 @@ def main():
     sys.excepthook=exception_hook
     args=sys.argv[1:]
     bridge=None
-    if '--shell' in args:
+    shell_command=next((flag for flag in ('--shell-new','--shell') if flag in args),None)
+    shell_new=shell_command=='--shell-new'
+    shell_paths=[]
+    if shell_command:
         from shell_bridge import ShellBridge
         bridge=ShellBridge()
-        shell_paths=[p for p in args[args.index('--shell')+1:] if not p.startswith('--')]
-        if not bridge.start(shell_paths):return 0
+        shell_paths=[p for p in args[args.index(shell_command)+1:] if not p.startswith('--')]
+        if not bridge.start(shell_paths,new_window=shell_new):return 0
+    elif not args:
+        from shell_bridge import ShellBridge
+        candidate=ShellBridge()
+        if candidate.start([]):bridge=candidate
     if '--smoke-test' in args:os.environ['PRISM_CONFIG_DIR']=str(Path(args[args.index('--smoke-test')+1])/'config')
     window=Window();window.show()
     if bridge is not None:
         from shell_bridge import attach_shell
-        attach_shell(window,bridge,shell_paths)
+        attach_shell(window,bridge,shell_paths,new_window=shell_new)
     elif '--demo' in args:QTimer.singleShot(100,window.demo)
     elif '--smoke-test' in args:
         from smoke import packaged_smoke

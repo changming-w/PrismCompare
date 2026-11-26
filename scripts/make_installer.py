@@ -13,7 +13,7 @@ def main():
     if not (source/'PrismCompare.exe').is_file():raise SystemExit('Build the app first.')
     out=ROOT/'build'/'installer';out.mkdir(parents=True,exist_ok=True)
     wix=ET.Element('{'+NS+'}Wix')
-    product=tag(wix,'Product',Id='*',Name='Prism Compare',Language='2052',Version='0.1.13',Manufacturer='Prism Compare',UpgradeCode='204A554F-844F-4FE3-B938-3BB126C6B874')
+    product=tag(wix,'Product',Id='*',Name='Prism Compare',Language='2052',Version='0.1.22',Manufacturer='Prism Compare',UpgradeCode='204A554F-844F-4FE3-B938-3BB126C6B874')
     tag(product,'Package',InstallerVersion='500',Compressed='yes',InstallScope='perMachine',Platform='x64',Description='Prism Compare image and document comparison')
     tag(product,'MajorUpgrade',DowngradeErrorMessage='A newer version of Prism Compare is already installed.')
     tag(product,'MediaTemplate',EmbedCab='yes',CompressionLevel='high')
@@ -51,6 +51,14 @@ def main():
         tag(shell,'RegistryValue',Root='HKLM',Key=key,Name='MultiSelectModel',Type='string',Value='Document')
         tag(shell,'RegistryValue',Root='HKLM',Key=key+'\\command',Type='string',Value='"[INSTALLFOLDER]PrismCompare.exe" --shell "%1"')
     tag(feature,'ComponentRef',Id='ExplorerMenu')
+    new_menu=tag(install,'Component',Id='ExplorerNewWindow',Guid='E16E7BEE-2510-458F-A86C-4C8A841ABB4C',Win64='yes')
+    for index,kind in enumerate(['*','Directory']):
+        key='Software\\Classes\\'+kind+'\\shell\\PrismCompareNewWindow'
+        tag(new_menu,'RegistryValue',Root='HKLM',Key=key,Type='string',Value='使用 Prism Compare 在新窗口中比对',KeyPath='yes' if index==0 else 'no')
+        tag(new_menu,'RegistryValue',Root='HKLM',Key=key,Name='Icon',Type='string',Value='[INSTALLFOLDER]PrismCompare.exe,0')
+        tag(new_menu,'RegistryValue',Root='HKLM',Key=key,Name='MultiSelectModel',Type='string',Value='Document')
+        tag(new_menu,'RegistryValue',Root='HKLM',Key=key+'\\command',Type='string',Value='"[INSTALLFOLDER]PrismCompare.exe" --shell-new "%1"')
+    tag(feature,'ComponentRef',Id='ExplorerNewWindow')
     tag(product,'UIRef',Id='WixUI_InstallDir')
     tag(product,'WixVariable',Id='WixUILicenseRtf',Value=str(ROOT/'assets'/'installer_notice.rtf'))
     ET.indent(wix)

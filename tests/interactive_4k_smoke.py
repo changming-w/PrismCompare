@@ -4,7 +4,7 @@ from pathlib import Path
 os.environ.setdefault('QT_QPA_PLATFORM','offscreen')
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'src'))
 import cv2,numpy as np
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication,QProgressBar
 from PySide6.QtCore import QTimer
 from app import Window,setup_fonts
 from fullscreen import FullscreenImages
@@ -33,14 +33,15 @@ with tempfile.TemporaryDirectory() as temp:
         v=w.details.view;t=v.transform()
         return (w.details.metrics.geometry().getRect(),w.image_split.geometry().getRect(),w.workspace.geometry().getRect(),v.viewport().size().width(),v.viewport().size().height(),t.m11(),t.m22(),t.dx(),t.dy(),v.horizontalScrollBar().value(),v.verticalScrollBar().value())
     stable=geometry();observed=[]
-    probe=QTimer();probe.setInterval(1);probe.timeout.connect(lambda:observed.append((geometry(),w.progress.isVisible())));probe.start()
+    assert not w.findChildren(QProgressBar)
+    probe=QTimer();probe.setInterval(1);probe.timeout.connect(lambda:observed.append(geometry()));probe.start()
     values=[];beats=[];tick=[0];timer=QTimer();timer.setInterval(30);started=time.monotonic()
     def drag():
         tick[0]+=1;beats.append(time.monotonic());w.details.threshold_slider.setValue(tick[0]*3);values.append(w.bundle.get('threshold'))
         if tick[0]>=60:timer.stop()
     timer.timeout.connect(drag);timer.start();wait(lambda:not timer.isActive());wait(lambda:w.preview_id is None and w.bundle.get('threshold')==180)
     probe.stop()
-    assert observed and all(g==stable and not visible for g,visible in observed),'Layout or viewport moved during tolerance updates'
+    assert observed and all(g==stable for g in observed),'Layout or viewport moved during tolerance updates'
     assert len(set(values))>=5
     metric=w.bundle['comparisons'][1];expected=int((metric['magnitude']>180/255+1e-8).sum());assert metric['above']==expected
     full=FullscreenImages(w.bundle['images'],0,w,pixmaps=[p.image.item.pixmap() for p in w.panes[:2]]);full.resize(1500,950);full.show();app.processEvents()

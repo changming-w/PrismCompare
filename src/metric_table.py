@@ -12,7 +12,7 @@ class MetricTable(QTableWidget):
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.setWordWrap(False);self.setAlternatingRowColors(True)
+        self.setWordWrap(False);self.setShowGrid(False);self.setAlternatingRowColors(False)
         self.horizontalHeader().setSectionResizeMode(0,QHeaderView.ResizeMode.Fixed)
         self.horizontalHeader().setSectionResizeMode(1,QHeaderView.ResizeMode.Stretch)
         self.setColumnWidth(0,85)

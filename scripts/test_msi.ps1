@@ -1,7 +1,7 @@
 $ErrorActionPreference='Stop'
 $projectRoot=Split-Path -Parent $PSScriptRoot
 Set-Location -LiteralPath $projectRoot
-$msi=Join-Path $projectRoot 'releases\PrismCompare-0.1.13-x64.msi'
+$msi=Join-Path $projectRoot 'releases\PrismCompare-0.1.22-x64.msi'
 $testRoot=Join-Path $projectRoot ('validation\msi_'+(Get-Date -Format 'yyyyMMdd_HHmmss'))
 $installDir=Join-Path $testRoot 'installed'
 New-Item -ItemType Directory -Path $testRoot -Force | Out-Null
